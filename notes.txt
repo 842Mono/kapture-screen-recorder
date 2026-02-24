@@ -1,0 +1,9 @@
+    pipeline_str = g_strdup_printf (
+        "pipewiresrc path=%u ! "
+        "videoconvert ! "
+        "videorate ! "
+        "video/x-raw,framerate=30/1 ! "
+        "x264enc tune=zerolatency speed-preset=ultrafast ! "
+        "matroskamux ! "
+        "filesink location=wayland-recording-c.mkv async=false",
+        node_id);
