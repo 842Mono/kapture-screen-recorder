@@ -21,6 +21,58 @@ static void on_sources_selected (GObject *source_object, GAsyncResult *res, gpoi
 static void on_session_created (GObject *source_object, GAsyncResult *res, gpointer user_data);
 static void on_proxy_created (GObject *source_object, GAsyncResult *res, gpointer user_data);
 
+/* Checks for required GStreamer plugins and shows an error dialog if they are missing */
+static gboolean
+check_gst_plugins (GtkWindow *parent)
+{
+    const gchar *missing_plugin = NULL;
+    const gchar *missing_pkg = NULL;
+
+    const gchar *plugins[][2] = {
+        {"pipewiresrc", "gstreamer1.0-pipewire"},
+        {"x264enc", "gstreamer1.0-plugins-ugly"},
+        {"avenc_aac", "gstreamer1.0-libav"},
+        {"pulsesrc", "gstreamer1.0-plugins-good"},
+        {NULL, NULL}
+    };
+
+    for (int i = 0; plugins[i][0] != NULL; ++i) {
+        GstElementFactory *factory = gst_element_factory_find (plugins[i][0]);
+        if (!factory) {
+            missing_plugin = plugins[i][0];
+            missing_pkg = plugins[i][1];
+            break;
+        }
+        g_object_unref (factory);
+    }
+
+    if (missing_plugin) {
+        gchar *primary_text = g_strdup_printf ("Required GStreamer plugin not found: %s", missing_plugin);
+        gchar *secondary_text = g_strdup_printf ("Please install the package '%s' and try again.", missing_pkg);
+
+        GtkWidget *dialog = gtk_message_dialog_new (parent,
+                                                    GTK_DIALOG_MODAL,
+                                                    GTK_MESSAGE_ERROR,
+                                                    GTK_BUTTONS_OK,
+                                                    "%s", primary_text);
+        gtk_message_dialog_format_secondary_text (GTK_MESSAGE_DIALOG (dialog), "%s", secondary_text);
+        
+        /* The g_application_run is not running yet, so we can't use gtk_dialog_run.
+         * Instead we make our own main loop to show the dialog.
+         */
+        gtk_widget_show(dialog);
+        while(g_main_context_iteration(NULL, TRUE));
+        
+        gtk_window_destroy (GTK_WINDOW (dialog));
+
+        g_free (primary_text);
+        g_free (secondary_text);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 /* Callback for when the window is destroyed */
 static void
 on_window_destroy (GtkWidget *widget, gpointer user_data)
@@ -98,21 +150,33 @@ on_gst_message (GstBus *bus, GstMessage *msg, AppData *data)
     return TRUE; /* Keep the message handler attached */
 }
 
-/* Constructs and starts the GStreamer pipeline with the given PipeWire node ID */
+/* Constructs and starts the GStreamer pipeline with the given PipeWire node IDs */
 static void
-start_gstreamer_pipeline (AppData *data, guint32 node_id)
+start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_node_id)
 {
     gchar *pipeline_str = NULL;
     GstBus *bus = NULL;
     GstStateChangeReturn ret;
+    GString *p_str;
 
-    pipeline_str = g_strdup_printf (
-        "pipewiresrc do-timestamp=true path=%u ! "
-        "queue ! videoconvert ! "
-        "videorate ! video/x-raw,framerate=30/1 ! "
-        "queue ! x264enc tune=zerolatency speed-preset=ultrafast ! "
-        "matroskamux ! filesink location=wayland-recording-c.mkv",
-        node_id);
+    p_str = g_string_new ("");
+
+    g_print ("Creating pipeline with audio and video.\n");
+    g_string_append (p_str, "matroskamux name=mux ! filesink location=kapture-recording.mkv ");
+
+    /* Video branch */
+    g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue ! videoconvert ! videorate ! video/x-raw,framerate=30/1 ! queue ! x264enc pass=quant quantizer=0 speed-preset=medium ! queue ! mux.video_0 ", video_node_id);
+
+    /* Audio branch */
+    if (audio_node_id != 0) {
+        g_print ("Using Portal provided audio stream (Node %u).\n", audio_node_id);
+        g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0", audio_node_id);
+    } else {
+        g_print ("No Portal audio stream. Falling back to PulseAudio default source.\n");
+        g_string_append (p_str, "pulsesrc ! queue ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
+    }
+
+    pipeline_str = g_string_free (p_str, FALSE);
 
     g_print ("Starting GStreamer pipeline: %s\n", pipeline_str);
     data->pipeline = gst_parse_launch (pipeline_str, NULL);
@@ -148,6 +212,8 @@ on_start_response (GDBusConnection *connection,
     AppData *data = (AppData *) user_data;
     guint32 response;
     GVariant *results;
+    guint32 video_node_id = 0;
+    guint32 audio_node_id = 0;
 
     g_dbus_connection_signal_unsubscribe (connection, data->request_signal_id);
     data->request_signal_id = 0;
@@ -161,31 +227,59 @@ on_start_response (GDBusConnection *connection,
         return;
     }
 
-    /* The 'streams' key contains the PipeWire node info */
     GVariant *streams = g_variant_lookup_value (results, "streams", G_VARIANT_TYPE ("a(ua{sv})"));
     if (!streams || g_variant_n_children (streams) == 0) {
         g_printerr ("No streams returned by portal.\n");
-        reset_ui_and_state (data);
         if (streams) g_variant_unref (streams);
         g_variant_unref (results);
+        reset_ui_and_state (data);
         return;
     }
 
-    /* Debug: Print the raw streams variant to see exactly what we got */
     gchar *streams_str = g_variant_print (streams, TRUE);
     g_print ("Portal returned streams: %s\n", streams_str);
     g_free (streams_str);
 
-    GVariant *stream_info = g_variant_get_child_value (streams, 0); /* Get first stream */
-    guint32 node_id;
-    g_variant_get (stream_info, "(u@a{sv})", &node_id, NULL);
+    GVariantIter iter;
+    GVariant *child;
+    g_variant_iter_init (&iter, streams);
+    while ((child = g_variant_iter_next_value (&iter))) {
+        guint32 node_id;
+        GVariant *props;
+        g_variant_get (child, "(u@a{sv})", &node_id, &props);
 
-    g_print ("PipeWire stream node ID: %u\n", node_id);
-    start_gstreamer_pipeline (data, node_id);
+        /* Check for video stream by looking for a 'size' property */
+        GVariant *size = g_variant_lookup_value (props, "size", G_VARIANT_TYPE ("(ii)"));
+        if (size) {
+            if (video_node_id == 0) {
+                g_print ("Found video stream with node ID: %u\n", node_id);
+                video_node_id = node_id;
+            } else {
+                g_print ("Found another video stream with node ID: %u (ignoring)\n", node_id);
+            }
+            g_variant_unref (size);
+        } else {
+            if (audio_node_id == 0) {
+                g_print ("Found audio stream with node ID: %u\n", node_id);
+                audio_node_id = node_id;
+            } else {
+                g_print ("Found another audio stream with node ID: %u (ignoring)\n", node_id);
+            }
+        }
+        g_variant_unref (props);
+        g_variant_unref (child);
+    }
 
-    g_variant_unref (stream_info);
     g_variant_unref (streams);
     g_variant_unref (results);
+
+    if (video_node_id == 0) {
+        g_printerr ("Could not find a video stream.\n");
+        reset_ui_and_state (data);
+        return;
+    }
+
+    start_gstreamer_pipeline (data, video_node_id, audio_node_id);
 }
 
 /* Step 3 Call: 'Start' method called, waiting for Request handle */
@@ -451,7 +545,7 @@ activate (GtkApplication *app, gpointer user_data)
 
     data->window = gtk_application_window_new (app);
     g_signal_connect (data->window, "destroy", G_CALLBACK (on_window_destroy), data);
-    gtk_window_set_title (GTK_WINDOW (data->window), "Wayland Recorder (C/GTK)");
+    gtk_window_set_title (GTK_WINDOW (data->window), "Kapture Screen Recorder");
     gtk_window_set_default_size (GTK_WINDOW (data->window), 300, 100);
 
     box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 10);
@@ -486,7 +580,12 @@ main (int argc, char **argv)
 
     gst_init (&argc, &argv);
 
-    app = gtk_application_new ("com.example.waylandrecorder.c", G_APPLICATION_DEFAULT_FLAGS);
+    if (!check_gst_plugins (NULL)) {
+        g_free (data);
+        return -1;
+    }
+
+    app = gtk_application_new ("org.kde.kapturescreenrecorder", G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect (app, "activate", G_CALLBACK (activate), data);
     status = g_application_run (G_APPLICATION (app), argc, argv);
 

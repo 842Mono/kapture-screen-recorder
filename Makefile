@@ -1,6 +1,6 @@
 # Makefile for the C-based Wayland Recorder
 
-TARGET = wayland-recorder-c
+TARGET = kapture-screen-recorder
 
 # Use pkg-config to find compiler and linker flags for our dependencies
 CFLAGS := $(shell pkg-config --cflags gtk4 gstreamer-1.0 gio-2.0)
