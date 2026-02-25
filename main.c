@@ -177,7 +177,6 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
     GString *p_str;
     const gchar *selected_audio_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(data->audio_source_combo));
     gboolean simple_mode = !gtk_check_button_get_active(GTK_CHECK_BUTTON(data->advanced_check));
-    gboolean using_mix = FALSE;
 
     /* Determine Video Quality Settings */
     const gchar *quality_setting = "pass=qual quantizer=20"; /* Default High Quality */
@@ -190,8 +189,16 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
     p_str = g_string_new ("");
 
     /* Determine Audio Strategy */
+    const gchar *effective_audio_id = selected_audio_id;
+    if (simple_mode) {
+        if (data->default_mic_id && data->default_monitor_id) effective_audio_id = "auto_mix";
+        else if (data->default_mic_id) effective_audio_id = data->default_mic_id;
+        else if (data->default_monitor_id) effective_audio_id = data->default_monitor_id;
+        else effective_audio_id = "portal";
+    }
+
     gboolean enable_audio = TRUE;
-    if (!simple_mode && g_strcmp0(selected_audio_id, "none") == 0) {
+    if (g_strcmp0(effective_audio_id, "none") == 0) {
         enable_audio = FALSE;
     }
 
@@ -203,42 +210,46 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
         g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue ! videoconvert ! videorate ! video/x-raw,framerate=30/1 ! queue ! x264enc %s speed-preset=medium ! queue ! mux.video_0 ", video_node_id, quality_setting);
 
         /* Audio branch for muxer */
-        if (simple_mode) {
-            /* Simple Mode: Try to mix Mic and System Audio */
-            if (data->default_mic_id && data->default_monitor_id) {
-                g_print ("Simple Mode: Mixing Microphone and System Audio.\n");
-                using_mix = TRUE;
+        if (g_strcmp0(effective_audio_id, "auto_mix") == 0) {
+            g_print ("Audio Strategy: Mixing Microphone and System Audio.\n");
+            
+            gchar **mic_parts = g_strsplit(data->default_mic_id, ":", 2);
+            gchar **mon_parts = g_strsplit(data->default_monitor_id, ":", 2);
+
+            if (mic_parts[0] && mic_parts[1] && mon_parts[0] && mon_parts[1]) {
                 g_string_append (p_str, "audiomixer name=mix ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! queue ! avenc_aac ! queue ! mux.audio_0 ");
-                g_string_append (p_str, "pulsesrc name=mic_src do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,channels=2 ! audiorate ! mix. ");
-                g_string_append (p_str, "pulsesrc name=monitor_src do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,channels=2 ! audiorate ! mix. ");
-            } else if (data->default_mic_id) {
-                g_print ("Simple Mode: Using Microphone only (System Audio not found).\n");
-                g_string_append (p_str, "pulsesrc name=mic_src do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
-            } else if (data->default_monitor_id) {
-                g_print ("Simple Mode: Using System Audio only (Microphone not found).\n");
-                g_string_append (p_str, "pulsesrc name=monitor_src do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
-            } else {
-                g_print ("Simple Mode: No audio devices found. Recording video only.\n");
-                /* Re-create string for video only to avoid muxer error with unused pads */
-                g_string_free(p_str, TRUE);
-                p_str = g_string_new("");
-                g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue ! videoconvert ! videorate ! video/x-raw,framerate=30/1 ! queue ! x264enc %s speed-preset=medium ! matroskamux ! filesink location=kapture-recording.mkv", video_node_id, quality_setting);
+                
+                if (g_strcmp0(mic_parts[0], "pipewiresrc") == 0)
+                    g_string_append_printf (p_str, "pipewiresrc name=mic_src do-timestamp=true path=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,channels=2 ! audiorate ! mix. ", mic_parts[1]);
+                else
+                    g_string_append_printf (p_str, "pulsesrc name=mic_src do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,channels=2 ! audiorate ! mix. ", mic_parts[1]);
+
+                if (g_strcmp0(mon_parts[0], "pipewiresrc") == 0)
+                    g_string_append_printf (p_str, "pipewiresrc name=monitor_src do-timestamp=true path=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,channels=2 ! audiorate ! mix. ", mon_parts[1]);
+                else
+                    g_string_append_printf (p_str, "pulsesrc name=monitor_src do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,channels=2 ! audiorate ! mix. ", mon_parts[1]);
             }
-        } else {
-            /* Advanced Mode: Use selection */
-            if (g_strcmp0(selected_audio_id, "portal") == 0) {
-                if (audio_node_id != 0) {
-                    g_print ("Using Portal provided audio stream (Node %u).\n", audio_node_id);
-                    g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0", audio_node_id);
-                } else {
-                    g_print ("Portal audio selected but not provided. Falling back to default PulseAudio source.\n");
-                    g_string_append (p_str, "pulsesrc name=audiosrc do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
-                }
+            g_strfreev(mic_parts);
+            g_strfreev(mon_parts);
+        } else if (g_strcmp0(effective_audio_id, "portal") == 0) {
+            if (audio_node_id != 0) {
+                g_print ("Using Portal provided audio stream (Node %u).\n", audio_node_id);
+                g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0", audio_node_id);
             } else {
-                /* A specific device was selected */
-                g_print("Using selected PulseAudio device: %s\n", selected_audio_id);
+                g_print ("Portal audio selected but not provided. Falling back to default PulseAudio source.\n");
                 g_string_append (p_str, "pulsesrc name=audiosrc do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
             }
+        } else {
+            /* A specific device was selected */
+            g_print("Using selected device: %s\n", effective_audio_id);
+            gchar **parts = g_strsplit(effective_audio_id, ":", 2);
+            if (parts[0] && parts[1]) {
+                if (g_strcmp0(parts[0], "pipewiresrc") == 0)
+                    g_string_append_printf (p_str, "pipewiresrc name=audiosrc do-timestamp=true path=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0", parts[1]);
+                else
+                    g_string_append_printf (p_str, "pulsesrc name=audiosrc do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0", parts[1]);
+            }
+            g_strfreev(parts);
         }
     } else {
         /* Video only pipeline */
@@ -256,37 +267,7 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
     data->pipeline = gst_parse_launch (pipeline_str, NULL);
     g_free (pipeline_str);
 
-    /* Programmatically set devices for PulseAudio sources */
-    if (data->pipeline) {
-        if (simple_mode) {
-            /* Set devices for mixing or single source in simple mode */
-            GstElement *mic_src = gst_bin_get_by_name(GST_BIN(data->pipeline), "mic_src");
-            GstElement *mon_src = gst_bin_get_by_name(GST_BIN(data->pipeline), "monitor_src");
-            
-            if (mic_src && data->default_mic_id) {
-                g_print("Setting mic_src to: %s\n", data->default_mic_id);
-                g_object_set(mic_src, "device", data->default_mic_id, NULL);
-                g_object_unref(mic_src);
-            }
-            if (mon_src && data->default_monitor_id) {
-                g_print("Setting monitor_src to: %s\n", data->default_monitor_id);
-                g_object_set(mon_src, "device", data->default_monitor_id, NULL);
-                g_object_unref(mon_src);
-            }
-        } else {
-            /* Advanced Mode: Set specific device if selected */
-            if (selected_audio_id && g_strcmp0(selected_audio_id, "none") != 0 && g_strcmp0(selected_audio_id, "portal") != 0) {
-                GstElement *audiosrc = gst_bin_get_by_name(GST_BIN(data->pipeline), "audiosrc");
-                if (audiosrc) {
-                    g_print("Programmatically setting audiosrc device to: %s\n", selected_audio_id);
-                    g_object_set(audiosrc, "device", selected_audio_id, NULL);
-                    g_object_unref(audiosrc);
-                } else {
-                    g_print("Could not find element 'audiosrc' in the pipeline.\n");
-                }
-            }
-        }
-    }
+    /* Devices are now baked into the pipeline string, no need to set them here */
 
     if (!data->pipeline) {
         g_printerr ("Failed to create GStreamer pipeline.\n");
@@ -666,10 +647,18 @@ stop_recording (GtkButton *button, gpointer user_data)
 static void
 populate_audio_sources(AppData *data) {
     GstDeviceMonitor *monitor = gst_device_monitor_new();
-    /* Filter for audio sources that are not sinks */
-    gst_device_monitor_add_filter(monitor, "Audio/Source", NULL);
-    gst_device_monitor_add_filter(monitor, "Audio/Duplex", NULL);
+    
+    /* Ask for everything to ensure we don't miss monitors due to filtering */
+    gst_device_monitor_set_show_all_devices(monitor, TRUE);
+    gst_device_monitor_add_filter(monitor, NULL, NULL);
     gst_device_monitor_start(monitor);
+
+    /* PulseAudio and PipeWire device providers are asynchronous.
+     * We need to pump the main loop briefly to let them discover devices. */
+    for (int i = 0; i < 100; i++) {
+        while (g_main_context_iteration(NULL, FALSE));
+        g_usleep(10000); /* Wait 1 second total */
+    }
 
     /* Add special items first */
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), "portal", "Portal Provided Audio");
@@ -679,14 +668,31 @@ populate_audio_sources(AppData *data) {
     for (GList *l = devices; l != NULL; l = l->next) {
         GstDevice *device = l->data;
         gchar *name = gst_device_get_display_name(device);
-        g_print ("Detected Audio Device: %s\n", name);
+        
+        /* Check element factory to filter out raw ALSA devices which confuse pulsesrc */
+        GstElement *element = gst_device_create_element(device, NULL);
+        gchar *factory_name = NULL;
+        if (element) {
+            GstElementFactory *factory = gst_element_get_factory(element);
+            if (factory) factory_name = g_strdup(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)));
+            gst_object_unref(element);
+        }
+
+        /* Allow only pipewiresrc and pulsesrc */
+        if (g_strcmp0(factory_name, "pipewiresrc") != 0 && g_strcmp0(factory_name, "pulsesrc") != 0) {
+            g_free(factory_name);
+            g_free(name);
+            continue;
+        }
+
         GstStructure *props = gst_device_get_properties(device);
         if (props) {
             const gchar *device_id = gst_structure_get_string(props, "device.id");
             const gchar *device_class = gst_structure_get_string(props, "device.class");
-            gchar *label = NULL;
+            g_print ("Detected Device: %s [Class: %s] [Factory: %s]\n", name, device_class ? device_class : "N/A", factory_name ? factory_name : "Unknown");
 
-            /* Make monitor sources more friendly */
+            gchar *full_id = g_strdup_printf("%s:%s", factory_name, device_id);
+            gchar *label = NULL;
             if (g_strcmp0(device_class, "monitor") == 0 || g_str_has_prefix(name, "Monitor of ")) {
                 const gchar *disp_name = name;
                 if (g_str_has_prefix(name, "Monitor of ")) {
@@ -695,22 +701,29 @@ populate_audio_sources(AppData *data) {
                 label = g_strdup_printf("System Audio (%s)", disp_name);
                 
                 /* Capture the first monitor found as default for simple mode */
-                if (!data->default_monitor_id) {
-                    data->default_monitor_id = g_strdup(device_id);
+                if (!data->default_monitor_id) { 
+                    data->default_monitor_id = g_strdup(full_id);
                 }
             } else {
                 label = g_strdup(name);
                 
                 /* Capture the first non-monitor (mic) found as default for simple mode */
                 if (!data->default_mic_id) {
-                    data->default_mic_id = g_strdup(device_id);
+                    data->default_mic_id = g_strdup(full_id);
                 }
             }
-            gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), device_id, label);
+            gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), full_id, label);
             g_free(label);
+            g_free(full_id);
             gst_structure_free(props);
         }
+        g_free(factory_name);
         g_free(name);
+    }
+
+    /* If we found both a mic and a monitor, add the Mix option to the dropdown */
+    if (data->default_mic_id && data->default_monitor_id) {
+        gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), "auto_mix", "Mix: Microphone + System Audio");
     }
 
     /* Set a default selection */
