@@ -10,6 +10,7 @@ typedef struct {
     GtkWidget *cursor_check;
     GtkWidget *audio_source_combo;
     GtkWidget *quality_combo;
+    GtkWidget *framerate_combo;
     GtkWidget *mix_box;
     GtkWidget *mix_source1_combo;
     GtkWidget *mix_source2_combo;
@@ -99,6 +100,7 @@ on_window_destroy (GtkWidget *widget, gpointer user_data)
     data->mix_box = NULL;
     data->cursor_check = NULL;
     data->quality_combo = NULL;
+    data->framerate_combo = NULL;
 }
 
 /* Resets the UI and cleans up all recording-related state */
@@ -113,6 +115,7 @@ reset_ui_and_state (AppData *data)
     if (data->mix_source2_combo) gtk_widget_set_sensitive (data->mix_source2_combo, TRUE);
     if (data->cursor_check) gtk_widget_set_sensitive (data->cursor_check, TRUE);
     if (data->quality_combo) gtk_widget_set_sensitive (data->quality_combo, TRUE);
+    if (data->framerate_combo) gtk_widget_set_sensitive (data->framerate_combo, TRUE);
 
     if (data->pipeline) {
         gst_element_set_state (data->pipeline, GST_STATE_NULL);
@@ -189,6 +192,10 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
     if (g_strcmp0(q_id, "lossless") == 0) quality_setting = "pass=quant quantizer=0";
     else if (g_strcmp0(q_id, "low") == 0) quality_setting = "pass=qual quantizer=35";
 
+    /* Determine Frame Rate */
+    const gchar *fps_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(data->framerate_combo));
+    const gchar *framerate = fps_id ? fps_id : "30";
+
     p_str = g_string_new ("");
 
     /* Determine Audio Strategy */
@@ -204,7 +211,7 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
         g_string_append (p_str, "matroskamux name=mux ! filesink location=kapture-recording.mkv ");
 
         /* Video branch for muxer */
-        g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue ! videoconvert ! videorate ! video/x-raw,framerate=30/1 ! queue ! x264enc %s speed-preset=medium ! queue ! mux.video_0 ", video_node_id, quality_setting);
+        g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue ! videoconvert ! videorate ! video/x-raw,framerate=%s/1 ! queue ! x264enc %s speed-preset=medium ! queue ! mux.video_0 ", video_node_id, framerate, quality_setting);
 
         /* Audio branch for muxer */
         if (g_strcmp0(effective_audio_id, "custom_mix") == 0) {
@@ -254,10 +261,10 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
         /* Video only pipeline */
         g_print ("Creating pipeline with video only.\n");
         g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! "
-            "queue ! videoconvert ! videorate ! video/x-raw,framerate=30/1 ! "
+            "queue ! videoconvert ! videorate ! video/x-raw,framerate=%s/1 ! "
             "queue ! x264enc %s speed-preset=medium ! "
             "matroskamux ! filesink location=kapture-recording.mkv",
-            video_node_id, quality_setting);
+            video_node_id, framerate, quality_setting);
     }
 
     pipeline_str = g_string_free (p_str, FALSE);
@@ -615,6 +622,7 @@ start_recording (GtkButton *button, gpointer user_data)
     gtk_widget_set_sensitive (data->mix_source1_combo, FALSE);
     gtk_widget_set_sensitive (data->mix_source2_combo, FALSE);
     gtk_widget_set_sensitive (data->quality_combo, FALSE);
+    gtk_widget_set_sensitive (data->framerate_combo, FALSE);
 
     data->cancellable = g_cancellable_new ();
 
@@ -737,7 +745,7 @@ populate_audio_sources(AppData *data) {
     }
 
     /* Always add the Mix option */
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), "custom_mix", "Mix (Select Sources)");
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), "custom_mix", "Mix (Microphone + Speakers)");
 
     /* Set defaults for mix combos */
     if (data->default_mic_id) gtk_combo_box_set_active_id(GTK_COMBO_BOX(data->mix_source1_combo), data->default_mic_id);
@@ -798,6 +806,11 @@ activate (GtkApplication *app, gpointer user_data)
     gtk_widget_set_margin_start (data->mix_box, 10); /* Indent */
     gtk_box_append (GTK_BOX (box), data->mix_box);
     
+    GtkWidget *mix_note = gtk_label_new ("Select two sources to record simultaneously (e.g. Microphone and System Audio).");
+    gtk_label_set_wrap (GTK_LABEL (mix_note), TRUE);
+    gtk_widget_set_halign (mix_note, GTK_ALIGN_START);
+    gtk_box_append (GTK_BOX (data->mix_box), mix_note);
+
     GtkWidget *mix1_label = gtk_label_new ("Source 1 (Microphone):");
     gtk_widget_set_halign (mix1_label, GTK_ALIGN_START);
     gtk_box_append (GTK_BOX (data->mix_box), mix1_label);
@@ -825,6 +838,17 @@ activate (GtkApplication *app, gpointer user_data)
     gtk_combo_box_set_active (GTK_COMBO_BOX (data->quality_combo), 0);
     gtk_box_append (GTK_BOX (box), data->quality_combo);
 
+    GtkWidget *fps_label = gtk_label_new ("Frame Rate:");
+    gtk_widget_set_halign (fps_label, GTK_ALIGN_START);
+    gtk_box_append (GTK_BOX (box), fps_label);
+
+    data->framerate_combo = gtk_combo_box_text_new ();
+    gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->framerate_combo), "30", "30 FPS");
+    gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->framerate_combo), "40", "40 FPS");
+    gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->framerate_combo), "50", "50 FPS");
+    gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->framerate_combo), "60", "60 FPS");
+    gtk_combo_box_set_active (GTK_COMBO_BOX (data->framerate_combo), 0);
+    gtk_box_append (GTK_BOX (box), data->framerate_combo);
 
     data->start_button = gtk_button_new_with_label ("Start Recording");
     g_signal_connect (data->start_button, "clicked", G_CALLBACK (start_recording), data);
