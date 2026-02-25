@@ -217,17 +217,11 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
             gchar **mon_parts = g_strsplit(data->default_monitor_id, ":", 2);
 
             if (mic_parts[0] && mic_parts[1] && mon_parts[0] && mon_parts[1]) {
-                g_string_append (p_str, "audiomixer name=mix ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! queue ! avenc_aac ! queue ! mux.audio_0 ");
+                g_string_append (p_str, "audiomixer name=mix latency=200000000 ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! queue ! avenc_aac ! queue ! mux.audio_0 ");
                 
-                if (g_strcmp0(mic_parts[0], "pipewiresrc") == 0)
-                    g_string_append_printf (p_str, "pipewiresrc name=mic_src do-timestamp=true path=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,channels=2 ! audiorate ! mix. ", mic_parts[1]);
-                else
-                    g_string_append_printf (p_str, "pulsesrc name=mic_src do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,channels=2 ! audiorate ! mix. ", mic_parts[1]);
+                g_string_append_printf (p_str, "pulsesrc name=mic_src do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! mix. ", mic_parts[1]);
 
-                if (g_strcmp0(mon_parts[0], "pipewiresrc") == 0)
-                    g_string_append_printf (p_str, "pipewiresrc name=monitor_src do-timestamp=true path=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,channels=2 ! audiorate ! mix. ", mon_parts[1]);
-                else
-                    g_string_append_printf (p_str, "pulsesrc name=monitor_src do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,channels=2 ! audiorate ! mix. ", mon_parts[1]);
+                g_string_append_printf (p_str, "pulsesrc name=monitor_src do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! mix. ", mon_parts[1]);
             }
             g_strfreev(mic_parts);
             g_strfreev(mon_parts);
@@ -244,10 +238,7 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
             g_print("Using selected device: %s\n", effective_audio_id);
             gchar **parts = g_strsplit(effective_audio_id, ":", 2);
             if (parts[0] && parts[1]) {
-                if (g_strcmp0(parts[0], "pipewiresrc") == 0)
-                    g_string_append_printf (p_str, "pipewiresrc name=audiosrc do-timestamp=true path=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0", parts[1]);
-                else
-                    g_string_append_printf (p_str, "pulsesrc name=audiosrc do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0", parts[1]);
+                g_string_append_printf (p_str, "pulsesrc name=audiosrc do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! queue ! avenc_aac ! queue ! mux.audio_0", parts[1]);
             }
             g_strfreev(parts);
         }
@@ -672,15 +663,21 @@ populate_audio_sources(AppData *data) {
         /* Check element factory to filter out raw ALSA devices which confuse pulsesrc */
         GstElement *element = gst_device_create_element(device, NULL);
         gchar *factory_name = NULL;
+        gchar *element_device_id = NULL;
         if (element) {
             GstElementFactory *factory = gst_element_get_factory(element);
             if (factory) factory_name = g_strdup(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)));
+            
+            if (g_strcmp0(factory_name, "pulsesrc") == 0) {
+                g_object_get(element, "device", &element_device_id, NULL);
+            }
             gst_object_unref(element);
         }
 
-        /* Allow only pipewiresrc and pulsesrc */
-        if (g_strcmp0(factory_name, "pipewiresrc") != 0 && g_strcmp0(factory_name, "pulsesrc") != 0) {
+        /* Allow only pulsesrc. pipewiresrc IDs from device monitor are often not usable paths. */
+        if (g_strcmp0(factory_name, "pulsesrc") != 0) {
             g_free(factory_name);
+            g_free(element_device_id);
             g_free(name);
             continue;
         }
@@ -691,7 +688,8 @@ populate_audio_sources(AppData *data) {
             const gchar *device_class = gst_structure_get_string(props, "device.class");
             g_print ("Detected Device: %s [Class: %s] [Factory: %s]\n", name, device_class ? device_class : "N/A", factory_name ? factory_name : "Unknown");
 
-            gchar *full_id = g_strdup_printf("%s:%s", factory_name, device_id);
+            const gchar *use_id = element_device_id ? element_device_id : device_id;
+            gchar *full_id = g_strdup_printf("%s:%s", factory_name, use_id);
             gchar *label = NULL;
             if (g_strcmp0(device_class, "monitor") == 0 || g_str_has_prefix(name, "Monitor of ")) {
                 const gchar *disp_name = name;
@@ -718,6 +716,7 @@ populate_audio_sources(AppData *data) {
             gst_structure_free(props);
         }
         g_free(factory_name);
+        g_free(element_device_id);
         g_free(name);
     }
 
