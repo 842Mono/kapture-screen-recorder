@@ -7,10 +7,12 @@ typedef struct {
     GtkWidget *window;
     GtkWidget *start_button;
     GtkWidget *stop_button;
-    GtkWidget *advanced_check;
-    GtkWidget *advanced_box;
+    GtkWidget *cursor_check;
     GtkWidget *audio_source_combo;
     GtkWidget *quality_combo;
+    GtkWidget *mix_box;
+    GtkWidget *mix_source1_combo;
+    GtkWidget *mix_source2_combo;
 
     GstElement *pipeline;
     GDBusProxy *portal_proxy;
@@ -92,8 +94,10 @@ on_window_destroy (GtkWidget *widget, gpointer user_data)
     data->start_button = NULL;
     data->stop_button = NULL;
     data->audio_source_combo = NULL;
-    data->advanced_check = NULL;
-    data->advanced_box = NULL;
+    data->mix_source1_combo = NULL;
+    data->mix_source2_combo = NULL;
+    data->mix_box = NULL;
+    data->cursor_check = NULL;
     data->quality_combo = NULL;
 }
 
@@ -105,7 +109,9 @@ reset_ui_and_state (AppData *data)
     if (data->start_button) gtk_widget_set_sensitive (data->start_button, TRUE);
     if (data->stop_button) gtk_widget_set_sensitive (data->stop_button, FALSE);
     if (data->audio_source_combo) gtk_widget_set_sensitive (data->audio_source_combo, TRUE);
-    if (data->advanced_check) gtk_widget_set_sensitive (data->advanced_check, TRUE);
+    if (data->mix_source1_combo) gtk_widget_set_sensitive (data->mix_source1_combo, TRUE);
+    if (data->mix_source2_combo) gtk_widget_set_sensitive (data->mix_source2_combo, TRUE);
+    if (data->cursor_check) gtk_widget_set_sensitive (data->cursor_check, TRUE);
     if (data->quality_combo) gtk_widget_set_sensitive (data->quality_combo, TRUE);
 
     if (data->pipeline) {
@@ -176,26 +182,17 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
     GstStateChangeReturn ret;
     GString *p_str;
     const gchar *selected_audio_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(data->audio_source_combo));
-    gboolean simple_mode = !gtk_check_button_get_active(GTK_CHECK_BUTTON(data->advanced_check));
 
     /* Determine Video Quality Settings */
     const gchar *quality_setting = "pass=qual quantizer=20"; /* Default High Quality */
-    if (!simple_mode) {
-        const gchar *q_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(data->quality_combo));
-        if (g_strcmp0(q_id, "lossless") == 0) quality_setting = "pass=quant quantizer=0";
-        else if (g_strcmp0(q_id, "low") == 0) quality_setting = "pass=qual quantizer=35";
-    }
+    const gchar *q_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(data->quality_combo));
+    if (g_strcmp0(q_id, "lossless") == 0) quality_setting = "pass=quant quantizer=0";
+    else if (g_strcmp0(q_id, "low") == 0) quality_setting = "pass=qual quantizer=35";
 
     p_str = g_string_new ("");
 
     /* Determine Audio Strategy */
     const gchar *effective_audio_id = selected_audio_id;
-    if (simple_mode) {
-        if (data->default_mic_id && data->default_monitor_id) effective_audio_id = "auto_mix";
-        else if (data->default_mic_id) effective_audio_id = data->default_mic_id;
-        else if (data->default_monitor_id) effective_audio_id = data->default_monitor_id;
-        else effective_audio_id = "portal";
-    }
 
     gboolean enable_audio = TRUE;
     if (g_strcmp0(effective_audio_id, "none") == 0) {
@@ -210,21 +207,32 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
         g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue ! videoconvert ! videorate ! video/x-raw,framerate=30/1 ! queue ! x264enc %s speed-preset=medium ! queue ! mux.video_0 ", video_node_id, quality_setting);
 
         /* Audio branch for muxer */
-        if (g_strcmp0(effective_audio_id, "auto_mix") == 0) {
-            g_print ("Audio Strategy: Mixing Microphone and System Audio.\n");
+        if (g_strcmp0(effective_audio_id, "custom_mix") == 0) {
+            g_print ("Audio Strategy: Mixing Two Sources.\n");
             
-            gchar **mic_parts = g_strsplit(data->default_mic_id, ":", 2);
-            gchar **mon_parts = g_strsplit(data->default_monitor_id, ":", 2);
+            const gchar *src1_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(data->mix_source1_combo));
+            const gchar *src2_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(data->mix_source2_combo));
+            
+            if (!src1_id) src1_id = data->default_mic_id;
+            if (!src2_id) src2_id = data->default_monitor_id;
 
-            if (mic_parts[0] && mic_parts[1] && mon_parts[0] && mon_parts[1]) {
+            gchar **mic_parts = src1_id ? g_strsplit(src1_id, ":", 2) : NULL;
+            gchar **mon_parts = src2_id ? g_strsplit(src2_id, ":", 2) : NULL;
+
+            if (mic_parts && mic_parts[0] && mic_parts[1] && mon_parts && mon_parts[0] && mon_parts[1]) {
                 g_string_append (p_str, "audiomixer name=mix latency=200000000 ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! queue ! avenc_aac ! queue ! mux.audio_0 ");
                 
                 g_string_append_printf (p_str, "pulsesrc name=mic_src do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! mix. ", mic_parts[1]);
 
                 g_string_append_printf (p_str, "pulsesrc name=monitor_src do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! mix. ", mon_parts[1]);
+            } else {
+                g_print ("Warning: Mix selected but source IDs are missing.\n");
+                /* Fallback to silence/dummy audio to keep pipeline valid? Or just fail gracefully. 
+                   For now, let's just append a dummy silence source to avoid syntax error in pipeline parsing */
+                g_string_append (p_str, "audiotestsrc wave=silence ! audioconvert ! avenc_aac ! mux.audio_0 ");
             }
-            g_strfreev(mic_parts);
-            g_strfreev(mon_parts);
+            if (mic_parts) g_strfreev(mic_parts);
+            if (mon_parts) g_strfreev(mon_parts);
         } else if (g_strcmp0(effective_audio_id, "portal") == 0) {
             if (audio_node_id != 0) {
                 g_print ("Using Portal provided audio stream (Node %u).\n", audio_node_id);
@@ -505,10 +513,14 @@ on_create_session_response (GDBusConnection *connection,
         g_variant_lookup (results, "session_handle", "s", &data->session_handle);
         g_print ("Session created: %s\n", data->session_handle);
 
+        gboolean show_cursor = gtk_check_button_get_active(GTK_CHECK_BUTTON(data->cursor_check));
+        guint cursor_mode = show_cursor ? 2 : 1; /* 2 = Embedded (Visible), 1 = Hidden */
+
         gchar *token = g_strdup_printf ("u%u", g_random_int ());
         GVariantBuilder *builder = g_variant_builder_new (G_VARIANT_TYPE ("a{sv}"));
         g_variant_builder_add (builder, "{sv}", "handle_token", g_variant_new_string (token));
         g_variant_builder_add (builder, "{sv}", "multiple", g_variant_new_boolean (FALSE));
+        g_variant_builder_add (builder, "{sv}", "cursor_mode", g_variant_new_uint32 (cursor_mode));
         GVariant *options = g_variant_builder_end (builder);
         g_free (token);
 
@@ -598,8 +610,10 @@ start_recording (GtkButton *button, gpointer user_data)
     g_print ("Starting recording process...\n");
     gtk_widget_set_sensitive (data->start_button, FALSE);
     gtk_widget_set_sensitive (data->stop_button, TRUE);
-    gtk_widget_set_sensitive (data->advanced_check, FALSE);
+    gtk_widget_set_sensitive (data->cursor_check, FALSE);
     gtk_widget_set_sensitive (data->audio_source_combo, FALSE);
+    gtk_widget_set_sensitive (data->mix_source1_combo, FALSE);
+    gtk_widget_set_sensitive (data->mix_source2_combo, FALSE);
     gtk_widget_set_sensitive (data->quality_combo, FALSE);
 
     data->cancellable = g_cancellable_new ();
@@ -711,6 +725,8 @@ populate_audio_sources(AppData *data) {
                 }
             }
             gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), full_id, label);
+            gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->mix_source1_combo), full_id, label);
+            gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->mix_source2_combo), full_id, label);
             g_free(label);
             g_free(full_id);
             gst_structure_free(props);
@@ -720,10 +736,12 @@ populate_audio_sources(AppData *data) {
         g_free(name);
     }
 
-    /* If we found both a mic and a monitor, add the Mix option to the dropdown */
-    if (data->default_mic_id && data->default_monitor_id) {
-        gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), "auto_mix", "Mix: Microphone + System Audio");
-    }
+    /* Always add the Mix option */
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), "custom_mix", "Mix (Select Sources)");
+
+    /* Set defaults for mix combos */
+    if (data->default_mic_id) gtk_combo_box_set_active_id(GTK_COMBO_BOX(data->mix_source1_combo), data->default_mic_id);
+    if (data->default_monitor_id) gtk_combo_box_set_active_id(GTK_COMBO_BOX(data->mix_source2_combo), data->default_monitor_id);
 
     /* Set a default selection */
     gtk_combo_box_set_active(GTK_COMBO_BOX(data->audio_source_combo), 0); /* "Portal Provided Audio" */
@@ -731,6 +749,16 @@ populate_audio_sources(AppData *data) {
     g_list_free_full(devices, g_object_unref);
     gst_device_monitor_stop(monitor);
     g_object_unref(monitor);
+}
+
+/* Callback for audio source combo change */
+static void
+on_audio_source_changed (GtkComboBox *widget, gpointer user_data)
+{
+    AppData *data = (AppData *) user_data;
+    const gchar *id = gtk_combo_box_get_active_id (widget);
+    gboolean is_mix = (g_strcmp0 (id, "custom_mix") == 0);
+    gtk_widget_set_visible (data->mix_box, is_mix);
 }
 
 /* This function is called when the application is first activated */
@@ -752,35 +780,50 @@ activate (GtkApplication *app, gpointer user_data)
     gtk_widget_set_margin_bottom (box, 10);
     gtk_window_set_child (GTK_WINDOW (data->window), box);
 
-    /* Advanced Mode Toggle */
-    data->advanced_check = gtk_check_button_new_with_label ("Advanced Mode");
-    gtk_widget_set_margin_bottom (data->advanced_check, 5);
-    gtk_box_append (GTK_BOX (box), data->advanced_check);
-
-    /* Advanced Controls Container */
-    data->advanced_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 5);
-    gtk_box_append (GTK_BOX (box), data->advanced_box);
-    /* Bind visibility to checkbox */
-    g_object_bind_property (data->advanced_check, "active", data->advanced_box, "visible", G_BINDING_DEFAULT | G_BINDING_SYNC_CREATE);
+    /* Cursor Toggle */
+    data->cursor_check = gtk_check_button_new_with_label ("Show Mouse Cursor");
+    gtk_check_button_set_active (GTK_CHECK_BUTTON (data->cursor_check), TRUE); /* Default to visible */
+    gtk_box_append (GTK_BOX (box), data->cursor_check);
 
     GtkWidget *audio_label = gtk_label_new ("Audio Source:");
     gtk_widget_set_halign (audio_label, GTK_ALIGN_START);
-    gtk_box_append (GTK_BOX (data->advanced_box), audio_label);
+    gtk_box_append (GTK_BOX (box), audio_label);
 
     data->audio_source_combo = gtk_combo_box_text_new ();
-    gtk_box_append (GTK_BOX (data->advanced_box), data->audio_source_combo);
+    g_signal_connect (data->audio_source_combo, "changed", G_CALLBACK (on_audio_source_changed), data);
+    gtk_box_append (GTK_BOX (box), data->audio_source_combo);
+
+    /* Mix selection box (hidden by default) */
+    data->mix_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 5);
+    gtk_widget_set_margin_start (data->mix_box, 10); /* Indent */
+    gtk_box_append (GTK_BOX (box), data->mix_box);
+    
+    GtkWidget *mix1_label = gtk_label_new ("Source 1 (Microphone):");
+    gtk_widget_set_halign (mix1_label, GTK_ALIGN_START);
+    gtk_box_append (GTK_BOX (data->mix_box), mix1_label);
+    data->mix_source1_combo = gtk_combo_box_text_new ();
+    gtk_box_append (GTK_BOX (data->mix_box), data->mix_source1_combo);
+
+    GtkWidget *mix2_label = gtk_label_new ("Source 2 (System/Other):");
+    gtk_widget_set_halign (mix2_label, GTK_ALIGN_START);
+    gtk_box_append (GTK_BOX (data->mix_box), mix2_label);
+    data->mix_source2_combo = gtk_combo_box_text_new ();
+    gtk_box_append (GTK_BOX (data->mix_box), data->mix_source2_combo);
+
     populate_audio_sources(data);
+    /* Trigger visibility update */
+    on_audio_source_changed(GTK_COMBO_BOX(data->audio_source_combo), data);
 
     GtkWidget *quality_label = gtk_label_new ("Video Quality:");
     gtk_widget_set_halign (quality_label, GTK_ALIGN_START);
-    gtk_box_append (GTK_BOX (data->advanced_box), quality_label);
+    gtk_box_append (GTK_BOX (box), quality_label);
 
     data->quality_combo = gtk_combo_box_text_new ();
     gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->quality_combo), "high", "High Quality (Default)");
     gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->quality_combo), "lossless", "Lossless (Large File)");
     gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->quality_combo), "low", "Low Quality (Small File)");
     gtk_combo_box_set_active (GTK_COMBO_BOX (data->quality_combo), 0);
-    gtk_box_append (GTK_BOX (data->advanced_box), data->quality_combo);
+    gtk_box_append (GTK_BOX (box), data->quality_combo);
 
 
     data->start_button = gtk_button_new_with_label ("Start Recording");
