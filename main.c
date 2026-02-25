@@ -208,15 +208,15 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
             if (data->default_mic_id && data->default_monitor_id) {
                 g_print ("Simple Mode: Mixing Microphone and System Audio.\n");
                 using_mix = TRUE;
-                g_string_append (p_str, "audiomixer name=mix ! queue ! audioconvert ! audioresample ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0 ");
-                g_string_append (p_str, "pulsesrc name=mic_src ! queue ! audioconvert ! audioresample ! mix. ");
-                g_string_append (p_str, "pulsesrc name=monitor_src ! queue ! audioconvert ! audioresample ! mix. ");
+                g_string_append (p_str, "audiomixer name=mix ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! queue ! avenc_aac ! queue ! mux.audio_0 ");
+                g_string_append (p_str, "pulsesrc name=mic_src do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,channels=2 ! audiorate ! mix. ");
+                g_string_append (p_str, "pulsesrc name=monitor_src do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,channels=2 ! audiorate ! mix. ");
             } else if (data->default_mic_id) {
                 g_print ("Simple Mode: Using Microphone only (System Audio not found).\n");
-                g_string_append (p_str, "pulsesrc name=mic_src ! queue ! audioconvert ! audioresample ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
+                g_string_append (p_str, "pulsesrc name=mic_src do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
             } else if (data->default_monitor_id) {
                 g_print ("Simple Mode: Using System Audio only (Microphone not found).\n");
-                g_string_append (p_str, "pulsesrc name=monitor_src ! queue ! audioconvert ! audioresample ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
+                g_string_append (p_str, "pulsesrc name=monitor_src do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
             } else {
                 g_print ("Simple Mode: No audio devices found. Recording video only.\n");
                 /* Re-create string for video only to avoid muxer error with unused pads */
@@ -229,15 +229,15 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
             if (g_strcmp0(selected_audio_id, "portal") == 0) {
                 if (audio_node_id != 0) {
                     g_print ("Using Portal provided audio stream (Node %u).\n", audio_node_id);
-                    g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0", audio_node_id);
+                    g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0", audio_node_id);
                 } else {
                     g_print ("Portal audio selected but not provided. Falling back to default PulseAudio source.\n");
-                    g_string_append (p_str, "pulsesrc name=audiosrc ! queue ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
+                    g_string_append (p_str, "pulsesrc name=audiosrc do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
                 }
             } else {
                 /* A specific device was selected */
                 g_print("Using selected PulseAudio device: %s\n", selected_audio_id);
-                g_string_append (p_str, "pulsesrc name=audiosrc ! queue ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
+                g_string_append (p_str, "pulsesrc name=audiosrc do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
             }
         }
     } else {
