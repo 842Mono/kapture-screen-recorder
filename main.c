@@ -12,6 +12,9 @@ typedef struct {
     GtkWidget *quality_combo;
     GtkWidget *framerate_combo;
     GtkWidget *mix_box;
+    GtkWidget *manual_box;
+    GtkWidget *pipeline_view;
+    GtkWidget *pipeline_check;
     GtkWidget *mix_source1_combo;
     GtkWidget *mix_source2_combo;
 
@@ -47,6 +50,16 @@ check_gst_plugins (GtkWindow *parent)
         {"pulsesrc", "gstreamer1.0-plugins-good"},
         {"audiomixer", "gstreamer1.0-plugins-base"},
         {"audioresample", "gstreamer1.0-plugins-base"},
+        {"mp4mux", "gstreamer1.0-plugins-good"},
+        {"webmmux", "gstreamer1.0-plugins-good"},
+        {"vp8enc", "gstreamer1.0-plugins-good"},
+        {"vp9enc", "gstreamer1.0-plugins-good"},
+        {"vorbisenc", "gstreamer1.0-plugins-base"},
+        {"opusenc", "gstreamer1.0-plugins-base"},
+        {"avimux", "gstreamer1.0-plugins-good"},
+        {"qtmux", "gstreamer1.0-plugins-good"},
+        {"jpegenc", "gstreamer1.0-plugins-good"},
+        {"avenc_huffyuv", "gstreamer1.0-libav"},
         {NULL, NULL}
     };
 
@@ -94,9 +107,12 @@ on_window_destroy (GtkWidget *widget, gpointer user_data)
     data->mix_source1_combo = NULL;
     data->mix_source2_combo = NULL;
     data->mix_box = NULL;
+    data->manual_box = NULL;
+    data->pipeline_view = NULL;
     data->cursor_check = NULL;
     data->quality_combo = NULL;
     data->framerate_combo = NULL;
+    data->pipeline_check = NULL;
     g_hash_table_destroy(data->display_labels);
 }
 
@@ -105,6 +121,7 @@ static void
 reset_ui_and_state (AppData *data)
 {
     g_print ("Resetting UI and state.\n");
+
     if (data->start_button) gtk_widget_set_sensitive (data->start_button, TRUE);
     if (data->stop_button) gtk_widget_set_sensitive (data->stop_button, FALSE);
     if (data->audio_source_combo) gtk_widget_set_sensitive (data->audio_source_combo, TRUE);
@@ -113,6 +130,8 @@ reset_ui_and_state (AppData *data)
     if (data->cursor_check) gtk_widget_set_sensitive (data->cursor_check, TRUE);
     if (data->quality_combo) gtk_widget_set_sensitive (data->quality_combo, TRUE);
     if (data->framerate_combo) gtk_widget_set_sensitive (data->framerate_combo, TRUE);
+    if (data->pipeline_check) gtk_widget_set_sensitive (data->pipeline_check, TRUE);
+    if (data->pipeline_view) gtk_text_view_set_editable(GTK_TEXT_VIEW(data->pipeline_view), TRUE);
 
     if (data->pipeline) {
         gst_element_set_state (data->pipeline, GST_STATE_NULL);
@@ -173,27 +192,66 @@ on_gst_message (GstBus *bus, GstMessage *msg, AppData *data)
     return TRUE; /* Keep the message handler attached */
 }
 
-/* Constructs and starts the GStreamer pipeline with the given PipeWire node IDs */
-static void
-start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_node_id)
+/* Helper function to construct a pipeline string based on UI settings */
+static gchar*
+build_pipeline_string(AppData *data, const gchar *video_node_str, guint32 portal_audio_node_id)
 {
-    gchar *pipeline_str = NULL;
-    GstBus *bus = NULL;
-    GstStateChangeReturn ret;
     GString *p_str;
     const gchar *selected_audio_id = gtk_string_list_get_string(GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->audio_source_combo))), gtk_drop_down_get_selected(GTK_DROP_DOWN(data->audio_source_combo)));
 
     /* Determine Video Quality Settings */
-    const gchar *quality_setting = "pass=qual quantizer=20"; /* Default High Quality */
     const gchar *q_id = gtk_string_list_get_string(GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->quality_combo))), gtk_drop_down_get_selected(GTK_DROP_DOWN(data->quality_combo)));
-    if (g_strcmp0(q_id, "lossless") == 0) quality_setting = "pass=quant quantizer=0";
-    else if (g_strcmp0(q_id, "low") == 0) quality_setting = "pass=qual quantizer=35";
 
     /* Determine Frame Rate */
     const gchar *fps_id = gtk_string_list_get_string(GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->framerate_combo))), gtk_drop_down_get_selected(GTK_DROP_DOWN(data->framerate_combo)));
     const gchar *framerate = fps_id ? fps_id : "30";
 
+    /* Use a large queue (2GB) to buffer video in RAM, helping with high-bandwidth formats or slow disks */
+    const gchar *v_queue = "queue max-size-bytes=2147483648 max-size-buffers=0 max-size-time=0";
+
     p_str = g_string_new ("");
+
+    /* Defaults for MKV High */
+    const gchar *muxer = "matroskamux";
+    const gchar *video_enc = "x264enc pass=qual quantizer=20 speed-preset=medium";
+    const gchar *audio_enc = "avenc_aac";
+    const gchar *ext = "mkv";
+
+    if (g_strcmp0(q_id, "mkv_lossless") == 0) {
+        video_enc = "x264enc pass=quant quantizer=0 speed-preset=medium";
+    } else if (g_strcmp0(q_id, "mkv_low") == 0) {
+        video_enc = "x264enc pass=qual quantizer=35 speed-preset=medium";
+    } else if (g_strcmp0(q_id, "mp4_high") == 0) {
+        muxer = "mp4mux";
+        ext = "mp4";
+    } else if (g_strcmp0(q_id, "mp4_low") == 0) {
+        muxer = "mp4mux";
+        video_enc = "x264enc pass=qual quantizer=35 speed-preset=medium";
+        ext = "mp4";
+    } else if (g_strcmp0(q_id, "webm_vp9") == 0) {
+        muxer = "webmmux";
+        video_enc = "vp9enc deadline=1 cpu-used=4";
+        audio_enc = "opusenc";
+        ext = "webm";
+    } else if (g_strcmp0(q_id, "webm_vp8") == 0) {
+        muxer = "webmmux";
+        video_enc = "vp8enc deadline=1 cpu-used=4";
+        audio_enc = "vorbisenc";
+        ext = "webm";
+    } else if (g_strcmp0(q_id, "mov_high") == 0) {
+        muxer = "qtmux";
+        ext = "mov";
+    } else if (g_strcmp0(q_id, "avi_raw") == 0) {
+        muxer = "avimux";
+        video_enc = "videoconvert ! video/x-raw,format=BGR"; /* Raw Uncompressed */
+        audio_enc = "audioconvert ! audio/x-raw"; /* PCM Audio */
+        ext = "avi";
+    } else if (g_strcmp0(q_id, "avi_huffyuv") == 0) {
+        muxer = "avimux";
+        video_enc = "videoconvert ! avenc_huffyuv"; /* Lossless Compression */
+        audio_enc = "audioconvert ! audio/x-raw"; /* PCM Audio */
+        ext = "avi";
+    }
 
     /* Determine Audio Strategy */
     const gchar *effective_audio_id = selected_audio_id;
@@ -205,10 +263,10 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
 
     if (enable_audio) {
         g_print ("Creating pipeline with audio and video.\n");
-        g_string_append (p_str, "matroskamux name=mux ! filesink location=kapture-recording.mkv ");
+        g_string_append_printf (p_str, "%s name=mux ! filesink location=kapture-recording.%s ", muxer, ext);
 
         /* Video branch for muxer */
-        g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue ! videoconvert ! videorate ! video/x-raw,framerate=%s/1 ! queue ! x264enc %s speed-preset=medium ! queue ! mux.video_0 ", video_node_id, framerate, quality_setting);
+        g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%s ! %s ! videoconvert ! videorate ! video/x-raw,framerate=%s/1 ! %s ! %s ! %s ! mux.video_0 ", video_node_str, v_queue, framerate, v_queue, video_enc, v_queue);
 
         /* Audio branch for muxer */
         if (g_strcmp0(effective_audio_id, "custom_mix") == 0) {
@@ -224,7 +282,7 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
             gchar **mon_parts = src2_id ? g_strsplit(src2_id, ":", 2) : NULL;
 
             if (mic_parts && mic_parts[0] && mic_parts[1] && mon_parts && mon_parts[0] && mon_parts[1]) {
-                g_string_append (p_str, "audiomixer name=mix latency=200000000 ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! queue ! avenc_aac ! queue ! mux.audio_0 ");
+                g_string_append_printf (p_str, "audiomixer name=mix latency=200000000 ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! queue ! %s ! queue ! mux.audio_0 ", audio_enc);
                 
                 g_string_append_printf (p_str, "pulsesrc name=mic_src do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! mix. ", mic_parts[1]);
 
@@ -233,39 +291,69 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
                 g_print ("Warning: Mix selected but source IDs are missing.\n");
                 /* Fallback to silence/dummy audio to keep pipeline valid? Or just fail gracefully. 
                    For now, let's just append a dummy silence source to avoid syntax error in pipeline parsing */
-                g_string_append (p_str, "audiotestsrc wave=silence ! audioconvert ! avenc_aac ! mux.audio_0 ");
+                g_string_append_printf (p_str, "audiotestsrc wave=silence ! audioconvert ! %s ! mux.audio_0 ", audio_enc);
             }
             if (mic_parts) g_strfreev(mic_parts);
             if (mon_parts) g_strfreev(mon_parts);
         } else if (g_strcmp0(effective_audio_id, "portal") == 0) {
-            if (audio_node_id != 0) {
-                g_print ("Using Portal provided audio stream (Node %u).\n", audio_node_id);
-                g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0", audio_node_id);
+            if (portal_audio_node_id != 0) {
+                g_print ("Using Portal provided audio stream (Node %u).\n", portal_audio_node_id);
+                g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! %s ! queue ! mux.audio_0", portal_audio_node_id, audio_enc);
             } else {
                 g_print ("Portal audio selected but not provided. Falling back to default PulseAudio source.\n");
-                g_string_append (p_str, "pulsesrc name=audiosrc do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! avenc_aac ! queue ! mux.audio_0");
+                g_string_append_printf (p_str, "pulsesrc name=audiosrc do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! %s ! queue ! mux.audio_0", audio_enc);
             }
         } else {
             /* A specific device was selected */
             g_print("Using selected device: %s\n", effective_audio_id);
             gchar **parts = g_strsplit(effective_audio_id, ":", 2);
             if (parts[0] && parts[1]) {
-                g_string_append_printf (p_str, "pulsesrc name=audiosrc do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! queue ! avenc_aac ! queue ! mux.audio_0", parts[1]);
+                g_string_append_printf (p_str, "pulsesrc name=audiosrc do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! queue ! %s ! queue ! mux.audio_0", parts[1], audio_enc);
             }
             g_strfreev(parts);
         }
     } else {
         /* Video only pipeline */
         g_print ("Creating pipeline with video only.\n");
-        g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! "
-            "queue ! videoconvert ! videorate ! video/x-raw,framerate=%s/1 ! "
-            "queue ! x264enc %s speed-preset=medium ! "
-            "matroskamux ! filesink location=kapture-recording.mkv",
-            video_node_id, framerate, quality_setting);
+        g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%s ! "
+            "%s ! videoconvert ! videorate ! video/x-raw,framerate=%s/1 ! "
+            "%s ! %s ! "
+            "%s name=mux ! filesink location=kapture-recording.%s",
+            video_node_str, v_queue, framerate, v_queue, video_enc, muxer, ext);
     }
 
-    pipeline_str = g_string_free (p_str, FALSE);
+    return g_string_free (p_str, FALSE);
+}
 
+/* Constructs and starts the GStreamer pipeline with the given PipeWire node IDs */
+static void
+start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_node_id)
+{
+    gchar *pipeline_str = NULL;
+    GstBus *bus = NULL;
+    GstStateChangeReturn ret;
+
+    g_print("Using pipeline from text view.\n");
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(data->pipeline_view));
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(buffer, &start, &end);
+    gchar *user_str = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
+    
+    gchar *video_node_id_str = g_strdup_printf("%u", video_node_id);
+    /* Replace placeholder */
+    gchar **split = g_strsplit(user_str, "VIDEO_NODE_ID", -1);
+    pipeline_str = g_strjoinv(video_node_id_str, split);
+    g_strfreev(split);
+    
+    g_free(user_str);
+    g_free(video_node_id_str);
+
+    if (!pipeline_str) {
+        g_printerr("Failed to generate a pipeline string.\n");
+        reset_ui_and_state(data);
+        return;
+    }
+    
     g_print ("Starting GStreamer pipeline: %s\n", pipeline_str);
     data->pipeline = gst_parse_launch (pipeline_str, NULL);
     g_free (pipeline_str);
@@ -620,6 +708,8 @@ start_recording (GtkButton *button, gpointer user_data)
     gtk_widget_set_sensitive (data->mix_source2_combo, FALSE);
     gtk_widget_set_sensitive (data->quality_combo, FALSE);
     gtk_widget_set_sensitive (data->framerate_combo, FALSE);
+    gtk_widget_set_sensitive (data->pipeline_check, FALSE);
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(data->pipeline_view), FALSE);
 
     data->cancellable = g_cancellable_new ();
 
@@ -818,14 +908,38 @@ populate_audio_sources(AppData *data) {
     g_object_unref(monitor);
 }
 
+static void update_pipeline_display(AppData *data) {
+    gchar *default_pipeline = build_pipeline_string(data, "VIDEO_NODE_ID", 0);
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(data->pipeline_view));
+    gtk_text_buffer_set_text(buffer, default_pipeline, -1);
+    g_free(default_pipeline);
+}
+
+/* Callback for any dropdown change */
+static void on_setting_changed(GObject *dropdown, GParamSpec *pspec, gpointer user_data) {
+    update_pipeline_display((AppData *)user_data);
+}
+
 /* Callback for audio source combo change */
+static void on_audio_source_changed(GObject *dropdown, GParamSpec *pspec, gpointer user_data) {
+    AppData *data = (AppData *)user_data;
+    const gchar *id = gtk_string_list_get_string(GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(dropdown))), gtk_drop_down_get_selected(GTK_DROP_DOWN(dropdown)));
+    gboolean is_mix = (g_strcmp0(id, "custom_mix") == 0);
+    gtk_widget_set_visible(data->mix_box, is_mix);
+    update_pipeline_display(data);
+}
+
+/* Callback for pipeline editor checkbox */
 static void
-on_audio_source_changed (GObject *dropdown, GParamSpec *pspec, gpointer user_data)
+on_pipeline_check_toggled (GtkCheckButton *button, gpointer user_data)
 {
     AppData *data = (AppData *) user_data;
-    const gchar *id = gtk_string_list_get_string(GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(dropdown))), gtk_drop_down_get_selected(GTK_DROP_DOWN(dropdown)));
-    gboolean is_mix = (g_strcmp0 (id, "custom_mix") == 0);
-    gtk_widget_set_visible (data->mix_box, is_mix);
+    gboolean active = gtk_check_button_get_active (button);
+    gtk_widget_set_visible (data->manual_box, active);
+    if (!active) {
+        int current_width = gtk_widget_get_width(data->window);
+        gtk_window_set_default_size(GTK_WINDOW(data->window), current_width, -1);
+    }
 }
 
 /* This function is called when the application is first activated */
@@ -881,6 +995,7 @@ activate (GtkApplication *app, gpointer user_data)
     gtk_box_append (GTK_BOX (data->mix_box), mix1_label);
     data->mix_source1_combo = gtk_drop_down_new(G_LIST_MODEL(gtk_string_list_new(NULL)), NULL);
     gtk_drop_down_set_factory(GTK_DROP_DOWN(data->mix_source1_combo), factory);
+    g_signal_connect(data->mix_source1_combo, "notify::selected", G_CALLBACK(on_setting_changed), data);
     gtk_box_append (GTK_BOX (data->mix_box), data->mix_source1_combo);
 
     GtkWidget *mix2_label = gtk_label_new ("Source 2:");
@@ -888,22 +1003,36 @@ activate (GtkApplication *app, gpointer user_data)
     gtk_box_append (GTK_BOX (data->mix_box), mix2_label);
     data->mix_source2_combo = gtk_drop_down_new(G_LIST_MODEL(gtk_string_list_new(NULL)), NULL);
     gtk_drop_down_set_factory(GTK_DROP_DOWN(data->mix_source2_combo), factory);
+    g_signal_connect(data->mix_source2_combo, "notify::selected", G_CALLBACK(on_setting_changed), data);
     gtk_box_append (GTK_BOX (data->mix_box), data->mix_source2_combo);
 
     populate_audio_sources(data);
-    /* Trigger visibility update */
-    on_audio_source_changed(G_OBJECT(data->audio_source_combo), NULL, data);
 
     GtkWidget *quality_label = gtk_label_new ("Video Quality:");
     gtk_widget_set_halign (quality_label, GTK_ALIGN_START);
     gtk_box_append (GTK_BOX (box), quality_label);
     
-    g_hash_table_insert(data->display_labels, g_strdup("high"), g_strdup("High Quality (Default)"));
-    g_hash_table_insert(data->display_labels, g_strdup("lossless"), g_strdup("Lossless (Large File)"));
-    g_hash_table_insert(data->display_labels, g_strdup("low"), g_strdup("Low Quality (Small File)"));
-    const char* quality_strings[] = {"high", "lossless", "low", NULL};
+    g_hash_table_insert(data->display_labels, g_strdup("mkv_high"), g_strdup("MKV - High Quality (H.264/AAC)"));
+    g_hash_table_insert(data->display_labels, g_strdup("mkv_lossless"), g_strdup("MKV - Lossless (Recommended)"));
+    g_hash_table_insert(data->display_labels, g_strdup("mkv_low"), g_strdup("MKV - Low Quality (H.264/AAC)"));
+    g_hash_table_insert(data->display_labels, g_strdup("mp4_high"), g_strdup("MP4 - High Quality (H.264/AAC)"));
+    g_hash_table_insert(data->display_labels, g_strdup("mp4_low"), g_strdup("MP4 - Low Quality (H.264/AAC)"));
+    g_hash_table_insert(data->display_labels, g_strdup("webm_vp9"), g_strdup("WebM - High Quality (VP9/Opus)"));
+    g_hash_table_insert(data->display_labels, g_strdup("webm_vp8"), g_strdup("WebM - Standard (VP8/Vorbis)"));
+    g_hash_table_insert(data->display_labels, g_strdup("mov_high"), g_strdup("MOV - High Quality (H.264/AAC)"));
+    g_hash_table_insert(data->display_labels, g_strdup("avi_raw"), g_strdup("AVI - Raw RGB (Huge File, No Compression)"));
+    g_hash_table_insert(data->display_labels, g_strdup("avi_huffyuv"), g_strdup("AVI - HuffYUV (Lossless, Best for Editing)"));
+
+    const char* quality_strings[] = {
+        "mkv_lossless", "mkv_high", "mkv_low",
+        "mp4_high", "mp4_low",
+        "webm_vp9", "webm_vp8",
+        "mov_high", "avi_raw", "avi_huffyuv",
+        NULL
+    };
     data->quality_combo = gtk_drop_down_new(G_LIST_MODEL(gtk_string_list_new(quality_strings)), NULL);
     gtk_drop_down_set_factory(GTK_DROP_DOWN(data->quality_combo), factory);
+    g_signal_connect(data->quality_combo, "notify::selected", G_CALLBACK(on_setting_changed), data);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(data->quality_combo), 0);
     gtk_box_append (GTK_BOX (box), data->quality_combo);
 
@@ -918,8 +1047,30 @@ activate (GtkApplication *app, gpointer user_data)
     const char* fps_strings[] = {"30", "40", "50", "60", NULL};
     data->framerate_combo = gtk_drop_down_new(G_LIST_MODEL(gtk_string_list_new(fps_strings)), NULL);
     gtk_drop_down_set_factory(GTK_DROP_DOWN(data->framerate_combo), factory);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(data->framerate_combo), 0);
+    g_signal_connect(data->framerate_combo, "notify::selected", G_CALLBACK(on_setting_changed), data);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(data->framerate_combo), 3); /* Default to 60 FPS */
     gtk_box_append (GTK_BOX (box), data->framerate_combo);
+
+    data->pipeline_check = gtk_check_button_new_with_label("Show Pipeline Editor");
+    g_signal_connect(data->pipeline_check, "toggled", G_CALLBACK(on_pipeline_check_toggled), data);
+    gtk_box_append(GTK_BOX(box), data->pipeline_check);
+
+    data->manual_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_widget_set_visible(data->manual_box, FALSE);
+    gtk_box_append(GTK_BOX(box), data->manual_box);
+
+    GtkWidget *manual_label = gtk_label_new("The GStreamer pipeline is generated from your selections. You can edit it directly for advanced control.");
+    gtk_label_set_wrap(GTK_LABEL(manual_label), TRUE);
+    gtk_widget_set_halign(manual_label, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(data->manual_box), manual_label);
+
+    GtkWidget *scrolled_window = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(scrolled_window, -1, 150);
+    data->pipeline_view = gtk_text_view_new();
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(data->pipeline_view), GTK_WRAP_WORD_CHAR);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled_window), data->pipeline_view);
+    gtk_box_append(GTK_BOX(data->manual_box), scrolled_window);
 
     g_object_unref(factory);
 
@@ -931,6 +1082,9 @@ activate (GtkApplication *app, gpointer user_data)
     g_signal_connect (data->stop_button, "clicked", G_CALLBACK (stop_recording), data);
     gtk_widget_set_sensitive (data->stop_button, FALSE);
     gtk_box_append (GTK_BOX (box), data->stop_button);
+
+    /* Trigger visibility update and initial pipeline string generation */
+    on_audio_source_changed(G_OBJECT(data->audio_source_combo), NULL, data);
 
     gtk_window_present (GTK_WINDOW (data->window));
 }
