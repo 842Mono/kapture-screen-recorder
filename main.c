@@ -23,6 +23,7 @@ typedef struct {
 
     gchar *default_mic_id;
     gchar *default_monitor_id;
+    GHashTable *display_labels;
 } AppData;
 
 static void populate_audio_sources(AppData *data);
@@ -63,23 +64,18 @@ check_gst_plugins (GtkWindow *parent)
         gchar *primary_text = g_strdup_printf ("Required GStreamer plugin not found: %s", missing_plugin);
         gchar *secondary_text = g_strdup_printf ("Please install the package '%s' and try again.", missing_pkg);
 
-        GtkWidget *dialog = gtk_message_dialog_new (parent,
-                                                    GTK_DIALOG_MODAL,
-                                                    GTK_MESSAGE_ERROR,
-                                                    GTK_BUTTONS_OK,
-                                                    "%s", primary_text);
-        gtk_message_dialog_format_secondary_text (GTK_MESSAGE_DIALOG (dialog), "%s", secondary_text);
+        GtkAlertDialog *dialog = gtk_alert_dialog_new ("%s", primary_text);
+        gtk_alert_dialog_set_detail (dialog, secondary_text);
         
         /* The g_application_run is not running yet, so we can't use gtk_dialog_run.
          * Instead we make our own main loop to show the dialog.
          */
-        gtk_widget_show(dialog);
+        gtk_alert_dialog_show(dialog, parent);
         while(g_main_context_iteration(NULL, TRUE));
         
-        gtk_window_destroy (GTK_WINDOW (dialog));
-
         g_free (primary_text);
         g_free (secondary_text);
+        g_object_unref(dialog);
         return FALSE;
     }
 
@@ -101,6 +97,7 @@ on_window_destroy (GtkWidget *widget, gpointer user_data)
     data->cursor_check = NULL;
     data->quality_combo = NULL;
     data->framerate_combo = NULL;
+    g_hash_table_destroy(data->display_labels);
 }
 
 /* Resets the UI and cleans up all recording-related state */
@@ -184,16 +181,16 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
     GstBus *bus = NULL;
     GstStateChangeReturn ret;
     GString *p_str;
-    const gchar *selected_audio_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(data->audio_source_combo));
+    const gchar *selected_audio_id = gtk_string_list_get_string(GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->audio_source_combo))), gtk_drop_down_get_selected(GTK_DROP_DOWN(data->audio_source_combo)));
 
     /* Determine Video Quality Settings */
     const gchar *quality_setting = "pass=qual quantizer=20"; /* Default High Quality */
-    const gchar *q_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(data->quality_combo));
+    const gchar *q_id = gtk_string_list_get_string(GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->quality_combo))), gtk_drop_down_get_selected(GTK_DROP_DOWN(data->quality_combo)));
     if (g_strcmp0(q_id, "lossless") == 0) quality_setting = "pass=quant quantizer=0";
     else if (g_strcmp0(q_id, "low") == 0) quality_setting = "pass=qual quantizer=35";
 
     /* Determine Frame Rate */
-    const gchar *fps_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(data->framerate_combo));
+    const gchar *fps_id = gtk_string_list_get_string(GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->framerate_combo))), gtk_drop_down_get_selected(GTK_DROP_DOWN(data->framerate_combo)));
     const gchar *framerate = fps_id ? fps_id : "30";
 
     p_str = g_string_new ("");
@@ -217,8 +214,8 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
         if (g_strcmp0(effective_audio_id, "custom_mix") == 0) {
             g_print ("Audio Strategy: Mixing Two Sources.\n");
             
-            const gchar *src1_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(data->mix_source1_combo));
-            const gchar *src2_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(data->mix_source2_combo));
+            const gchar *src1_id = gtk_string_list_get_string(GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->mix_source1_combo))), gtk_drop_down_get_selected(GTK_DROP_DOWN(data->mix_source1_combo)));
+            const gchar *src2_id = gtk_string_list_get_string(GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->mix_source2_combo))), gtk_drop_down_get_selected(GTK_DROP_DOWN(data->mix_source2_combo)));
             
             if (!src1_id) src1_id = data->default_mic_id;
             if (!src2_id) src2_id = data->default_monitor_id;
@@ -656,6 +653,49 @@ stop_recording (GtkButton *button, gpointer user_data)
     }
 }
 
+/* Factory setup callback to create a label for each dropdown item */
+static void
+on_item_setup (GtkSignalListItemFactory *factory, GtkListItem *list_item)
+{
+  GtkWidget *label = gtk_label_new ("");
+  gtk_widget_set_halign(label, GTK_ALIGN_START);
+  gtk_list_item_set_child (list_item, label);
+}
+
+/* Factory bind callback to set the text of the label */
+static void
+on_item_bind (GtkSignalListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
+{
+    AppData *data = user_data;
+    GtkLabel *label = GTK_LABEL (gtk_list_item_get_child (list_item));
+    GtkStringObject *string_object = GTK_STRING_OBJECT(gtk_list_item_get_item(list_item));
+    const char *id = gtk_string_object_get_string(string_object);
+
+    const char *display_text = g_hash_table_lookup (data->display_labels, id);
+    gtk_label_set_text (label, display_text ? display_text : id);
+}
+
+/* Helper to find the position of a string in a GtkStringList model */
+static gboolean
+find_string_in_model(GtkStringList *model, const gchar *str, guint *pos)
+{
+    if (!str || !model) {
+        return FALSE;
+    }
+
+    guint n_items = g_list_model_get_n_items(G_LIST_MODEL(model));
+    for (guint i = 0; i < n_items; i++) {
+        const gchar *item_str = gtk_string_list_get_string(model, i);
+        if (g_strcmp0(item_str, str) == 0) {
+            if (pos) {
+                *pos = i;
+            }
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 /* Populates the audio source combo box with devices found by GStreamer */
 static void
 populate_audio_sources(AppData *data) {
@@ -674,8 +714,15 @@ populate_audio_sources(AppData *data) {
     }
 
     /* Add special items first */
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), "portal", "Portal Provided Audio");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), "none", "No Audio");
+    g_hash_table_insert(data->display_labels, g_strdup("portal"), g_strdup("Portal Provided Audio"));
+    g_hash_table_insert(data->display_labels, g_strdup("none"), g_strdup("No Audio"));
+
+    GtkStringList *audio_model = GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->audio_source_combo)));
+    gtk_string_list_append(audio_model, "portal");
+    gtk_string_list_append(audio_model, "none");
+
+    GtkStringList *mix1_model = GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->mix_source1_combo)));
+    GtkStringList *mix2_model = GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->mix_source2_combo)));
 
     GList *devices = gst_device_monitor_get_devices(monitor);
     for (GList *l = devices; l != NULL; l = l->next) {
@@ -732,9 +779,10 @@ populate_audio_sources(AppData *data) {
                     data->default_mic_id = g_strdup(full_id);
                 }
             }
-            gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), full_id, label);
-            gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->mix_source1_combo), full_id, label);
-            gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->mix_source2_combo), full_id, label);
+            g_hash_table_insert(data->display_labels, g_strdup(full_id), g_strdup(label));
+            gtk_string_list_append(audio_model, full_id);
+            gtk_string_list_append(mix1_model, full_id);
+            gtk_string_list_append(mix2_model, full_id);
             g_free(label);
             g_free(full_id);
             gst_structure_free(props);
@@ -745,14 +793,25 @@ populate_audio_sources(AppData *data) {
     }
 
     /* Always add the Mix option */
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(data->audio_source_combo), "custom_mix", "Mix (Microphone + Speakers)");
+    g_hash_table_insert(data->display_labels, g_strdup("custom_mix"), g_strdup("Mix (Microphone + Speakers)"));
+    gtk_string_list_append(audio_model, "custom_mix");
 
     /* Set defaults for mix combos */
-    if (data->default_mic_id) gtk_combo_box_set_active_id(GTK_COMBO_BOX(data->mix_source1_combo), data->default_mic_id);
-    if (data->default_monitor_id) gtk_combo_box_set_active_id(GTK_COMBO_BOX(data->mix_source2_combo), data->default_monitor_id);
+    if (data->default_mic_id) {
+        guint pos;
+        if (find_string_in_model(mix1_model, data->default_mic_id, &pos)) {
+            gtk_drop_down_set_selected(GTK_DROP_DOWN(data->mix_source1_combo), pos);
+        }
+    }
+    if (data->default_monitor_id) {
+        guint pos;
+        if (find_string_in_model(mix2_model, data->default_monitor_id, &pos)) {
+            gtk_drop_down_set_selected(GTK_DROP_DOWN(data->mix_source2_combo), pos);
+        }
+    }
 
     /* Set a default selection */
-    gtk_combo_box_set_active(GTK_COMBO_BOX(data->audio_source_combo), 0); /* "Portal Provided Audio" */
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(data->audio_source_combo), 0); /* "Portal Provided Audio" */
 
     g_list_free_full(devices, g_object_unref);
     gst_device_monitor_stop(monitor);
@@ -761,10 +820,10 @@ populate_audio_sources(AppData *data) {
 
 /* Callback for audio source combo change */
 static void
-on_audio_source_changed (GtkComboBox *widget, gpointer user_data)
+on_audio_source_changed (GObject *dropdown, GParamSpec *pspec, gpointer user_data)
 {
     AppData *data = (AppData *) user_data;
-    const gchar *id = gtk_combo_box_get_active_id (widget);
+    const gchar *id = gtk_string_list_get_string(GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(dropdown))), gtk_drop_down_get_selected(GTK_DROP_DOWN(dropdown)));
     gboolean is_mix = (g_strcmp0 (id, "custom_mix") == 0);
     gtk_widget_set_visible (data->mix_box, is_mix);
 }
@@ -797,8 +856,14 @@ activate (GtkApplication *app, gpointer user_data)
     gtk_widget_set_halign (audio_label, GTK_ALIGN_START);
     gtk_box_append (GTK_BOX (box), audio_label);
 
-    data->audio_source_combo = gtk_combo_box_text_new ();
-    g_signal_connect (data->audio_source_combo, "changed", G_CALLBACK (on_audio_source_changed), data);
+    /* Create a factory for our dropdowns to use custom labels */
+    GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
+    g_signal_connect (factory, "setup", G_CALLBACK (on_item_setup), NULL);
+    g_signal_connect (factory, "bind", G_CALLBACK (on_item_bind), data);
+
+    data->audio_source_combo = gtk_drop_down_new(G_LIST_MODEL(gtk_string_list_new(NULL)), NULL);
+    gtk_drop_down_set_factory(GTK_DROP_DOWN(data->audio_source_combo), factory);
+    g_signal_connect (data->audio_source_combo, "notify::selected", G_CALLBACK (on_audio_source_changed), data);
     gtk_box_append (GTK_BOX (box), data->audio_source_combo);
 
     /* Mix selection box (hidden by default) */
@@ -811,44 +876,52 @@ activate (GtkApplication *app, gpointer user_data)
     gtk_widget_set_halign (mix_note, GTK_ALIGN_START);
     gtk_box_append (GTK_BOX (data->mix_box), mix_note);
 
-    GtkWidget *mix1_label = gtk_label_new ("Source 1 (Microphone):");
+    GtkWidget *mix1_label = gtk_label_new ("Source 1:");
     gtk_widget_set_halign (mix1_label, GTK_ALIGN_START);
     gtk_box_append (GTK_BOX (data->mix_box), mix1_label);
-    data->mix_source1_combo = gtk_combo_box_text_new ();
+    data->mix_source1_combo = gtk_drop_down_new(G_LIST_MODEL(gtk_string_list_new(NULL)), NULL);
+    gtk_drop_down_set_factory(GTK_DROP_DOWN(data->mix_source1_combo), factory);
     gtk_box_append (GTK_BOX (data->mix_box), data->mix_source1_combo);
 
-    GtkWidget *mix2_label = gtk_label_new ("Source 2 (System/Other):");
+    GtkWidget *mix2_label = gtk_label_new ("Source 2:");
     gtk_widget_set_halign (mix2_label, GTK_ALIGN_START);
     gtk_box_append (GTK_BOX (data->mix_box), mix2_label);
-    data->mix_source2_combo = gtk_combo_box_text_new ();
+    data->mix_source2_combo = gtk_drop_down_new(G_LIST_MODEL(gtk_string_list_new(NULL)), NULL);
+    gtk_drop_down_set_factory(GTK_DROP_DOWN(data->mix_source2_combo), factory);
     gtk_box_append (GTK_BOX (data->mix_box), data->mix_source2_combo);
 
     populate_audio_sources(data);
     /* Trigger visibility update */
-    on_audio_source_changed(GTK_COMBO_BOX(data->audio_source_combo), data);
+    on_audio_source_changed(G_OBJECT(data->audio_source_combo), NULL, data);
 
     GtkWidget *quality_label = gtk_label_new ("Video Quality:");
     gtk_widget_set_halign (quality_label, GTK_ALIGN_START);
     gtk_box_append (GTK_BOX (box), quality_label);
-
-    data->quality_combo = gtk_combo_box_text_new ();
-    gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->quality_combo), "high", "High Quality (Default)");
-    gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->quality_combo), "lossless", "Lossless (Large File)");
-    gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->quality_combo), "low", "Low Quality (Small File)");
-    gtk_combo_box_set_active (GTK_COMBO_BOX (data->quality_combo), 0);
+    
+    g_hash_table_insert(data->display_labels, g_strdup("high"), g_strdup("High Quality (Default)"));
+    g_hash_table_insert(data->display_labels, g_strdup("lossless"), g_strdup("Lossless (Large File)"));
+    g_hash_table_insert(data->display_labels, g_strdup("low"), g_strdup("Low Quality (Small File)"));
+    const char* quality_strings[] = {"high", "lossless", "low", NULL};
+    data->quality_combo = gtk_drop_down_new(G_LIST_MODEL(gtk_string_list_new(quality_strings)), NULL);
+    gtk_drop_down_set_factory(GTK_DROP_DOWN(data->quality_combo), factory);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(data->quality_combo), 0);
     gtk_box_append (GTK_BOX (box), data->quality_combo);
 
     GtkWidget *fps_label = gtk_label_new ("Frame Rate:");
     gtk_widget_set_halign (fps_label, GTK_ALIGN_START);
     gtk_box_append (GTK_BOX (box), fps_label);
 
-    data->framerate_combo = gtk_combo_box_text_new ();
-    gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->framerate_combo), "30", "30 FPS");
-    gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->framerate_combo), "40", "40 FPS");
-    gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->framerate_combo), "50", "50 FPS");
-    gtk_combo_box_text_append (GTK_COMBO_BOX_TEXT (data->framerate_combo), "60", "60 FPS");
-    gtk_combo_box_set_active (GTK_COMBO_BOX (data->framerate_combo), 0);
+    g_hash_table_insert(data->display_labels, g_strdup("30"), g_strdup("30 FPS"));
+    g_hash_table_insert(data->display_labels, g_strdup("40"), g_strdup("40 FPS"));
+    g_hash_table_insert(data->display_labels, g_strdup("50"), g_strdup("50 FPS"));
+    g_hash_table_insert(data->display_labels, g_strdup("60"), g_strdup("60 FPS"));
+    const char* fps_strings[] = {"30", "40", "50", "60", NULL};
+    data->framerate_combo = gtk_drop_down_new(G_LIST_MODEL(gtk_string_list_new(fps_strings)), NULL);
+    gtk_drop_down_set_factory(GTK_DROP_DOWN(data->framerate_combo), factory);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(data->framerate_combo), 0);
     gtk_box_append (GTK_BOX (box), data->framerate_combo);
+
+    g_object_unref(factory);
 
     data->start_button = gtk_button_new_with_label ("Start Recording");
     g_signal_connect (data->start_button, "clicked", G_CALLBACK (start_recording), data);
@@ -869,6 +942,7 @@ main (int argc, char **argv)
     int status;
     /* Allocate our state struct on the heap and initialize to zero */
     AppData *data = g_new0 (AppData, 1);
+    data->display_labels = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 
     /* Force GStreamer debug level to 3 (INFO) for all categories */
     g_setenv ("GST_DEBUG", "3", TRUE);
