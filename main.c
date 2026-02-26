@@ -7,6 +7,7 @@ typedef struct {
     GtkWidget *window;
     GtkWidget *start_button;
     GtkWidget *stop_button;
+    GtkWidget *filename_entry;
     GtkWidget *cursor_check;
     GtkWidget *audio_source_combo;
     GtkWidget *quality_combo;
@@ -103,6 +104,7 @@ on_window_destroy (GtkWidget *widget, gpointer user_data)
     data->window = NULL;
     data->start_button = NULL;
     data->stop_button = NULL;
+    data->filename_entry = NULL;
     data->audio_source_combo = NULL;
     data->mix_source1_combo = NULL;
     data->mix_source2_combo = NULL;
@@ -124,6 +126,7 @@ reset_ui_and_state (AppData *data)
 
     if (data->start_button) gtk_widget_set_sensitive (data->start_button, TRUE);
     if (data->stop_button) gtk_widget_set_sensitive (data->stop_button, FALSE);
+    if (data->filename_entry) gtk_widget_set_sensitive (data->filename_entry, TRUE);
     if (data->audio_source_combo) gtk_widget_set_sensitive (data->audio_source_combo, TRUE);
     if (data->mix_source1_combo) gtk_widget_set_sensitive (data->mix_source1_combo, TRUE);
     if (data->mix_source2_combo) gtk_widget_set_sensitive (data->mix_source2_combo, TRUE);
@@ -194,7 +197,7 @@ on_gst_message (GstBus *bus, GstMessage *msg, AppData *data)
 
 /* Helper function to construct a pipeline string based on UI settings */
 static gchar*
-build_pipeline_string(AppData *data, const gchar *video_node_str, guint32 portal_audio_node_id)
+build_pipeline_string(AppData *data, const gchar *video_node_str, guint32 portal_audio_node_id, const gchar **ext_out)
 {
     GString *p_str;
     const gchar *selected_audio_id = gtk_string_list_get_string(GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->audio_source_combo))), gtk_drop_down_get_selected(GTK_DROP_DOWN(data->audio_source_combo)));
@@ -261,9 +264,11 @@ build_pipeline_string(AppData *data, const gchar *video_node_str, guint32 portal
         enable_audio = FALSE;
     }
 
+    if (ext_out) *ext_out = ext;
+
     if (enable_audio) {
         g_print ("Creating pipeline with audio and video.\n");
-        g_string_append_printf (p_str, "%s name=mux ! filesink location=kapture-recording.%s ", muxer, ext);
+        g_string_append_printf (p_str, "%s name=mux ! filesink name=filesink location=dummy.%s ", muxer, ext);
 
         /* Video branch for muxer */
         g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%s ! %s ! videoconvert ! videorate ! video/x-raw,framerate=%s/1 ! %s ! %s ! %s ! mux.video_0 ", video_node_str, v_queue, framerate, v_queue, video_enc, v_queue);
@@ -318,7 +323,7 @@ build_pipeline_string(AppData *data, const gchar *video_node_str, guint32 portal
         g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%s ! "
             "%s ! videoconvert ! videorate ! video/x-raw,framerate=%s/1 ! "
             "%s ! %s ! "
-            "%s name=mux ! filesink location=kapture-recording.%s",
+            "%s name=mux ! filesink name=filesink location=dummy.%s",
             video_node_str, v_queue, framerate, v_queue, video_enc, muxer, ext);
     }
 
@@ -333,38 +338,58 @@ start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_no
     GstBus *bus = NULL;
     GstStateChangeReturn ret;
 
-    g_print("Using pipeline from text view.\n");
-    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(data->pipeline_view));
-    GtkTextIter start, end;
-    gtk_text_buffer_get_bounds(buffer, &start, &end);
-    gchar *user_str = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
-    
+    const gchar *ext = NULL;
     gchar *video_node_id_str = g_strdup_printf("%u", video_node_id);
-    /* Replace placeholder */
-    gchar **split = g_strsplit(user_str, "VIDEO_NODE_ID", -1);
-    pipeline_str = g_strjoinv(video_node_id_str, split);
-    g_strfreev(split);
-    
-    g_free(user_str);
+    gchar *pipeline_template = build_pipeline_string(data, video_node_id_str, audio_node_id, &ext);
     g_free(video_node_id_str);
 
-    if (!pipeline_str) {
+    /* Generate a unique filename */
+    const gchar *base_name = gtk_editable_get_text(GTK_EDITABLE(data->filename_entry));
+    if (!base_name || *base_name == '\0') {
+        base_name = "Kapture Recording";
+    }
+    gchar *videos_dir = g_strdup(g_get_user_special_dir(G_USER_DIRECTORY_VIDEOS));
+    if (!videos_dir) {
+        videos_dir = g_strdup(g_get_home_dir());
+    }
+
+    gchar *final_path = g_build_filename(videos_dir, g_strdup_printf("%s.%s", base_name, ext), NULL);
+    int counter = 2;
+    while (g_file_test(final_path, G_FILE_TEST_EXISTS)) {
+        g_free(final_path);
+        final_path = g_build_filename(videos_dir, g_strdup_printf("%s (%d).%s", base_name, counter++, ext), NULL);
+    }
+    g_free(videos_dir);
+    
+    if (!pipeline_template) {
         g_printerr("Failed to generate a pipeline string.\n");
+        g_free(final_path);
         reset_ui_and_state(data);
         return;
     }
-    
-    g_print ("Starting GStreamer pipeline: %s\n", pipeline_str);
-    data->pipeline = gst_parse_launch (pipeline_str, NULL);
-    g_free (pipeline_str);
-
-    /* Devices are now baked into the pipeline string, no need to set them here */
+    data->pipeline = gst_parse_launch (pipeline_template, NULL);
+    g_free (pipeline_template);
 
     if (!data->pipeline) {
         g_printerr ("Failed to create GStreamer pipeline.\n");
+        g_free(final_path);
         reset_ui_and_state (data);
         return;
     }
+
+    GstElement *filesink = gst_bin_get_by_name(GST_BIN(data->pipeline), "filesink");
+    if (filesink) {
+        g_print("Setting output file to: %s\n", final_path);
+        g_object_set(filesink, "location", final_path, NULL);
+        g_object_unref(filesink);
+    } else {
+        g_printerr("Could not find 'filesink' element in the pipeline!\n");
+        g_free(final_path);
+        reset_ui_and_state(data);
+        return;
+    }
+    g_free(final_path);
+
 
     bus = gst_element_get_bus (data->pipeline);
     gst_bus_add_watch (bus, (GstBusFunc) on_gst_message, data);
@@ -702,6 +727,7 @@ start_recording (GtkButton *button, gpointer user_data)
     g_print ("Starting recording process...\n");
     gtk_widget_set_sensitive (data->start_button, FALSE);
     gtk_widget_set_sensitive (data->stop_button, TRUE);
+    gtk_widget_set_sensitive (data->filename_entry, FALSE);
     gtk_widget_set_sensitive (data->cursor_check, FALSE);
     gtk_widget_set_sensitive (data->audio_source_combo, FALSE);
     gtk_widget_set_sensitive (data->mix_source1_combo, FALSE);
@@ -909,7 +935,7 @@ populate_audio_sources(AppData *data) {
 }
 
 static void update_pipeline_display(AppData *data) {
-    gchar *default_pipeline = build_pipeline_string(data, "VIDEO_NODE_ID", 0);
+    gchar *default_pipeline = build_pipeline_string(data, "VIDEO_NODE_ID", 0, NULL);
     GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(data->pipeline_view));
     gtk_text_buffer_set_text(buffer, default_pipeline, -1);
     g_free(default_pipeline);
@@ -965,6 +991,14 @@ activate (GtkApplication *app, gpointer user_data)
     data->cursor_check = gtk_check_button_new_with_label ("Show Mouse Cursor");
     gtk_check_button_set_active (GTK_CHECK_BUTTON (data->cursor_check), TRUE); /* Default to visible */
     gtk_box_append (GTK_BOX (box), data->cursor_check);
+
+    GtkWidget *filename_label = gtk_label_new("Filename:");
+    gtk_widget_set_halign(filename_label, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(box), filename_label);
+
+    data->filename_entry = gtk_entry_new();
+    gtk_editable_set_text(GTK_EDITABLE(data->filename_entry), "Kapture Recording");
+    gtk_box_append(GTK_BOX(box), data->filename_entry);
 
     GtkWidget *audio_label = gtk_label_new ("Audio Source:");
     gtk_widget_set_halign (audio_label, GTK_ALIGN_START);
@@ -1051,27 +1085,6 @@ activate (GtkApplication *app, gpointer user_data)
     gtk_drop_down_set_selected(GTK_DROP_DOWN(data->framerate_combo), 3); /* Default to 60 FPS */
     gtk_box_append (GTK_BOX (box), data->framerate_combo);
 
-    data->pipeline_check = gtk_check_button_new_with_label("Show Pipeline Editor");
-    g_signal_connect(data->pipeline_check, "toggled", G_CALLBACK(on_pipeline_check_toggled), data);
-    gtk_box_append(GTK_BOX(box), data->pipeline_check);
-
-    data->manual_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    gtk_widget_set_visible(data->manual_box, FALSE);
-    gtk_box_append(GTK_BOX(box), data->manual_box);
-
-    GtkWidget *manual_label = gtk_label_new("The GStreamer pipeline is generated from your selections. You can edit it directly for advanced control.");
-    gtk_label_set_wrap(GTK_LABEL(manual_label), TRUE);
-    gtk_widget_set_halign(manual_label, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(data->manual_box), manual_label);
-
-    GtkWidget *scrolled_window = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_widget_set_size_request(scrolled_window, -1, 150);
-    data->pipeline_view = gtk_text_view_new();
-    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(data->pipeline_view), GTK_WRAP_WORD_CHAR);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled_window), data->pipeline_view);
-    gtk_box_append(GTK_BOX(data->manual_box), scrolled_window);
-
     g_object_unref(factory);
 
     data->start_button = gtk_button_new_with_label ("Start Recording");
@@ -1082,9 +1095,6 @@ activate (GtkApplication *app, gpointer user_data)
     g_signal_connect (data->stop_button, "clicked", G_CALLBACK (stop_recording), data);
     gtk_widget_set_sensitive (data->stop_button, FALSE);
     gtk_box_append (GTK_BOX (box), data->stop_button);
-
-    /* Trigger visibility update and initial pipeline string generation */
-    on_audio_source_changed(G_OBJECT(data->audio_source_combo), NULL, data);
 
     gtk_window_present (GTK_WINDOW (data->window));
 }
