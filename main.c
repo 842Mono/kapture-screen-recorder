@@ -224,6 +224,9 @@ build_pipeline_string(AppData *data, const gchar *video_node_str, guint32 portal
         video_enc = "x264enc pass=quant quantizer=0 speed-preset=medium";
     } else if (g_strcmp0(q_id, "mkv_low") == 0) {
         video_enc = "x264enc pass=qual quantizer=35 speed-preset=medium";
+    } else if (g_strcmp0(q_id, "mkv_raw") == 0) {
+        video_enc = "videoconvert ! video/x-raw,format=I420"; /* Raw Uncompressed YUV */
+        audio_enc = "audioconvert ! audio/x-raw";  /* PCM Audio */
     } else if (g_strcmp0(q_id, "mp4_high") == 0) {
         muxer = "mp4mux";
         ext = "mp4";
@@ -246,7 +249,7 @@ build_pipeline_string(AppData *data, const gchar *video_node_str, guint32 portal
         ext = "mov";
     } else if (g_strcmp0(q_id, "avi_raw") == 0) {
         muxer = "avimux";
-        video_enc = "videoconvert ! video/x-raw,format=BGR"; /* Raw Uncompressed */
+        video_enc = "videoconvert ! video/x-raw,format=BGR"; /* Raw Uncompressed RGB */
         audio_enc = "audioconvert ! audio/x-raw"; /* PCM Audio */
         ext = "avi";
     } else if (g_strcmp0(q_id, "avi_huffyuv") == 0) {
@@ -1049,16 +1052,17 @@ activate (GtkApplication *app, gpointer user_data)
     g_hash_table_insert(data->display_labels, g_strdup("mkv_high"), g_strdup("MKV - High Quality (H.264/AAC)"));
     g_hash_table_insert(data->display_labels, g_strdup("mkv_lossless"), g_strdup("MKV - Lossless (Recommended)"));
     g_hash_table_insert(data->display_labels, g_strdup("mkv_low"), g_strdup("MKV - Low Quality (H.264/AAC)"));
+    g_hash_table_insert(data->display_labels, g_strdup("mkv_raw"), g_strdup("MKV - Raw Uncompressed (Huge File!)"));
     g_hash_table_insert(data->display_labels, g_strdup("mp4_high"), g_strdup("MP4 - High Quality (H.264/AAC)"));
     g_hash_table_insert(data->display_labels, g_strdup("mp4_low"), g_strdup("MP4 - Low Quality (H.264/AAC)"));
     g_hash_table_insert(data->display_labels, g_strdup("webm_vp9"), g_strdup("WebM - High Quality (VP9/Opus)"));
     g_hash_table_insert(data->display_labels, g_strdup("webm_vp8"), g_strdup("WebM - Standard (VP8/Vorbis)"));
     g_hash_table_insert(data->display_labels, g_strdup("mov_high"), g_strdup("MOV - High Quality (H.264/AAC)"));
-    g_hash_table_insert(data->display_labels, g_strdup("avi_raw"), g_strdup("AVI - Raw RGB (Huge File, No Compression)"));
-    g_hash_table_insert(data->display_labels, g_strdup("avi_huffyuv"), g_strdup("AVI - HuffYUV (Lossless, Best for Editing)"));
+    g_hash_table_insert(data->display_labels, g_strdup("avi_raw"), g_strdup("AVI - Raw RGB (Huge File, May Not Work Well With High FPS Options)"));
+    g_hash_table_insert(data->display_labels, g_strdup("avi_huffyuv"), g_strdup("AVI - HuffYUV (Lossless, May Not Work Well With High FPS Options)"));
 
     const char* quality_strings[] = {
-        "mkv_lossless", "mkv_high", "mkv_low",
+        "mkv_lossless", "mkv_high", "mkv_low", "mkv_raw",
         "mp4_high", "mp4_low",
         "webm_vp9", "webm_vp8",
         "mov_high", "avi_raw", "avi_huffyuv",
