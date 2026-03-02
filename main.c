@@ -236,12 +236,12 @@ build_pipeline_string(AppData *data, const gchar *video_node_str, guint32 portal
         ext = "mp4";
     } else if (g_strcmp0(q_id, "webm_vp9") == 0) {
         muxer = "webmmux";
-        video_enc = "vp9enc deadline=1 cpu-used=4";
+        video_enc = "vp9enc deadline=1 cpu-used=8 row-mt=true"; /* Faster encoding */
         audio_enc = "opusenc";
         ext = "webm";
     } else if (g_strcmp0(q_id, "webm_vp8") == 0) {
         muxer = "webmmux";
-        video_enc = "vp8enc deadline=1 cpu-used=4";
+        video_enc = "vp8enc deadline=1 cpu-used=4"; /* VP8 is generally faster but less efficient */
         audio_enc = "vorbisenc";
         ext = "webm";
     } else if (g_strcmp0(q_id, "mov_high") == 0) {
@@ -292,9 +292,9 @@ build_pipeline_string(AppData *data, const gchar *video_node_str, guint32 portal
             if (mic_parts && mic_parts[0] && mic_parts[1] && mon_parts && mon_parts[0] && mon_parts[1]) {
                 g_string_append_printf (p_str, "audiomixer name=mix latency=200000000 ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! queue ! %s ! queue ! mux.audio_0 ", audio_enc);
                 
-                g_string_append_printf (p_str, "pulsesrc name=mic_src do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! mix. ", mic_parts[1]);
+                g_string_append_printf (p_str, "pulsesrc name=mic_src do-timestamp=true provide-clock=false device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! queue ! mix. ", mic_parts[1]);
 
-                g_string_append_printf (p_str, "pulsesrc name=monitor_src do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! mix. ", mon_parts[1]);
+                g_string_append_printf (p_str, "pulsesrc name=monitor_src do-timestamp=true provide-clock=false device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! queue ! mix. ", mon_parts[1]);
             } else {
                 g_print ("Warning: Mix selected but source IDs are missing.\n");
                 /* Fallback to silence/dummy audio to keep pipeline valid? Or just fail gracefully. 
@@ -309,14 +309,14 @@ build_pipeline_string(AppData *data, const gchar *video_node_str, guint32 portal
                 g_string_append_printf (p_str, "pipewiresrc do-timestamp=true path=%u ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! %s ! queue ! mux.audio_0", portal_audio_node_id, audio_enc);
             } else {
                 g_print ("Portal audio selected but not provided. Falling back to default PulseAudio source.\n");
-                g_string_append_printf (p_str, "pulsesrc name=audiosrc do-timestamp=true ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! %s ! queue ! mux.audio_0", audio_enc);
+                g_string_append_printf (p_str, "pulsesrc name=audiosrc do-timestamp=true provide-clock=false ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audiorate ! queue ! %s ! queue ! mux.audio_0", audio_enc);
             }
         } else {
             /* A specific device was selected */
             g_print("Using selected device: %s\n", effective_audio_id);
             gchar **parts = g_strsplit(effective_audio_id, ":", 2);
             if (parts[0] && parts[1]) {
-                g_string_append_printf (p_str, "pulsesrc name=audiosrc do-timestamp=true device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! queue ! %s ! queue ! mux.audio_0", parts[1], audio_enc);
+                g_string_append_printf (p_str, "pulsesrc name=audiosrc do-timestamp=true provide-clock=false device=\"%s\" ! queue max-size-time=3000000000 max-size-bytes=0 max-size-buffers=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=100000000 ! queue ! %s ! queue ! mux.audio_0", parts[1], audio_enc);
             }
             g_strfreev(parts);
         }
@@ -912,7 +912,7 @@ populate_audio_sources(AppData *data) {
     }
 
     /* Always add the Mix option */
-    g_hash_table_insert(data->display_labels, g_strdup("custom_mix"), g_strdup("Mix (Microphone + Speakers)"));
+    g_hash_table_insert(data->display_labels, g_strdup("custom_mix"), g_strdup("Mix (For Recording Microphone + Speakers)"));
     gtk_string_list_append(audio_model, "custom_mix");
 
     /* Set defaults for mix combos */
@@ -991,7 +991,7 @@ activate (GtkApplication *app, gpointer user_data)
     gtk_window_set_child (GTK_WINDOW (data->window), box);
 
     /* Cursor Toggle */
-    data->cursor_check = gtk_check_button_new_with_label ("Show Mouse Cursor");
+    data->cursor_check = gtk_check_button_new_with_label ("Record Mouse Cursor");
     gtk_check_button_set_active (GTK_CHECK_BUTTON (data->cursor_check), TRUE); /* Default to visible */
     gtk_box_append (GTK_BOX (box), data->cursor_check);
 
@@ -1088,6 +1088,27 @@ activate (GtkApplication *app, gpointer user_data)
     g_signal_connect(data->framerate_combo, "notify::selected", G_CALLBACK(on_setting_changed), data);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(data->framerate_combo), 3); /* Default to 60 FPS */
     gtk_box_append (GTK_BOX (box), data->framerate_combo);
+
+    data->pipeline_check = gtk_check_button_new_with_label("Show Pipeline Editor");
+    g_signal_connect(data->pipeline_check, "toggled", G_CALLBACK(on_pipeline_check_toggled), data);
+    gtk_box_append(GTK_BOX(box), data->pipeline_check);
+
+    data->manual_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_widget_set_visible(data->manual_box, FALSE);
+    gtk_box_append(GTK_BOX(box), data->manual_box);
+
+    GtkWidget *manual_label = gtk_label_new("The GStreamer pipeline is generated from your selections. You can edit it directly for advanced control.");
+    gtk_label_set_wrap(GTK_LABEL(manual_label), TRUE);
+    gtk_widget_set_halign(manual_label, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(data->manual_box), manual_label);
+
+    GtkWidget *scrolled_window = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(scrolled_window, -1, 150);
+    data->pipeline_view = gtk_text_view_new();
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(data->pipeline_view), GTK_WRAP_WORD_CHAR);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled_window), data->pipeline_view);
+    gtk_box_append(GTK_BOX(data->manual_box), scrolled_window);
 
     g_object_unref(factory);
 
