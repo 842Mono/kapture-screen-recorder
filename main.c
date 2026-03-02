@@ -263,7 +263,7 @@ build_pipeline_string(AppData *data, const gchar *video_node_str, guint32 portal
     const gchar *effective_audio_id = selected_audio_id;
 
     gboolean enable_audio = TRUE;
-    if (g_strcmp0(effective_audio_id, "none") == 0) {
+    if (effective_audio_id == NULL || g_strcmp0(effective_audio_id, "none") == 0) {
         enable_audio = FALSE;
     }
 
@@ -1043,8 +1043,6 @@ activate (GtkApplication *app, gpointer user_data)
     g_signal_connect(data->mix_source2_combo, "notify::selected", G_CALLBACK(on_setting_changed), data);
     gtk_box_append (GTK_BOX (data->mix_box), data->mix_source2_combo);
 
-    populate_audio_sources(data);
-
     GtkWidget *quality_label = gtk_label_new ("Video Quality:");
     gtk_widget_set_halign (quality_label, GTK_ALIGN_START);
     gtk_box_append (GTK_BOX (box), quality_label);
@@ -1058,8 +1056,8 @@ activate (GtkApplication *app, gpointer user_data)
     g_hash_table_insert(data->display_labels, g_strdup("webm_vp9"), g_strdup("WebM - High Quality (VP9/Opus)"));
     g_hash_table_insert(data->display_labels, g_strdup("webm_vp8"), g_strdup("WebM - Standard (VP8/Vorbis)"));
     g_hash_table_insert(data->display_labels, g_strdup("mov_high"), g_strdup("MOV - High Quality (H.264/AAC)"));
-    g_hash_table_insert(data->display_labels, g_strdup("avi_raw"), g_strdup("AVI - Raw RGB (Huge File, May Not Work Well With High FPS Options)"));
-    g_hash_table_insert(data->display_labels, g_strdup("avi_huffyuv"), g_strdup("AVI - HuffYUV (Lossless, May Not Work Well With High FPS Options)"));
+    g_hash_table_insert(data->display_labels, g_strdup("avi_raw"), g_strdup("AVI - Raw RGB (Huge File, May Stutter at 60fps)"));
+    g_hash_table_insert(data->display_labels, g_strdup("avi_huffyuv"), g_strdup("AVI - HuffYUV (Lossless, May Stutter at 60fps)"));
 
     const char* quality_strings[] = {
         "mkv_lossless", "mkv_high", "mkv_low", "mkv_raw",
@@ -1071,7 +1069,6 @@ activate (GtkApplication *app, gpointer user_data)
     data->quality_combo = gtk_drop_down_new(G_LIST_MODEL(gtk_string_list_new(quality_strings)), NULL);
     gtk_drop_down_set_factory(GTK_DROP_DOWN(data->quality_combo), factory);
     g_signal_connect(data->quality_combo, "notify::selected", G_CALLBACK(on_setting_changed), data);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(data->quality_combo), 0);
     gtk_box_append (GTK_BOX (box), data->quality_combo);
 
     GtkWidget *fps_label = gtk_label_new ("Frame Rate:");
@@ -1086,7 +1083,6 @@ activate (GtkApplication *app, gpointer user_data)
     data->framerate_combo = gtk_drop_down_new(G_LIST_MODEL(gtk_string_list_new(fps_strings)), NULL);
     gtk_drop_down_set_factory(GTK_DROP_DOWN(data->framerate_combo), factory);
     g_signal_connect(data->framerate_combo, "notify::selected", G_CALLBACK(on_setting_changed), data);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(data->framerate_combo), 3); /* Default to 60 FPS */
     gtk_box_append (GTK_BOX (box), data->framerate_combo);
 
     data->pipeline_check = gtk_check_button_new_with_label("Show Pipeline Editor");
@@ -1120,6 +1116,16 @@ activate (GtkApplication *app, gpointer user_data)
     g_signal_connect (data->stop_button, "clicked", G_CALLBACK (stop_recording), data);
     gtk_widget_set_sensitive (data->stop_button, FALSE);
     gtk_box_append (GTK_BOX (box), data->stop_button);
+
+    /* Set initial selections now that all widgets are created */
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(data->quality_combo), 0);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(data->framerate_combo), 3); /* Default to 60 FPS */
+
+    /* Populate audio sources now that all widgets are created */
+    populate_audio_sources(data);
+
+    /* Trigger visibility update and initial pipeline string generation */
+    on_audio_source_changed(G_OBJECT(data->audio_source_combo), NULL, data);
 
     gtk_window_present (GTK_WINDOW (data->window));
 }
