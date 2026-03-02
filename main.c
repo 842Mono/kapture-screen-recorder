@@ -981,6 +981,7 @@ activate (GtkApplication *app, gpointer user_data)
     data->window = gtk_application_window_new (app);
     g_signal_connect (data->window, "destroy", G_CALLBACK (on_window_destroy), data);
     gtk_window_set_title (GTK_WINDOW (data->window), "Kapture Screen Recorder");
+
     gtk_window_set_default_size (GTK_WINDOW (data->window), 350, -1); /* -1 for auto height */
 
     box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 10);
@@ -1057,7 +1058,7 @@ activate (GtkApplication *app, gpointer user_data)
     g_hash_table_insert(data->display_labels, g_strdup("webm_vp8"), g_strdup("WebM - Standard (VP8/Vorbis)"));
     g_hash_table_insert(data->display_labels, g_strdup("mov_high"), g_strdup("MOV - High Quality (H.264/AAC)"));
     g_hash_table_insert(data->display_labels, g_strdup("avi_raw"), g_strdup("AVI - Raw RGB (Huge File, May Not Work Well at High FPS Selections)"));
-    g_hash_table_insert(data->display_labels, g_strdup("avi_huffyuv"), g_strdup("AVI - HuffYUV (Lossless, May Not Work Well at High FPS Selections)"));
+    g_hash_table_insert(data->display_labels, g_strdup("avi_huffyuv"), g_strdup("AVI - HuffYUV (Huge File, Lossless, May Not Work Well at High FPS Selections)"));
 
     const char* quality_strings[] = {
         "mkv_lossless", "mkv_high", "mkv_low", "mkv_raw",

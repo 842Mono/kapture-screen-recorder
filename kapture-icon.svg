@@ -1,0 +1,35 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="lens-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#E0E0E0;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#A0A0A0;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Camera Body -->
+  <rect x="20" y="50" width="216" height="156" rx="24" fill="#3C4043" />
+
+  <!-- Film Sprocket Holes -->
+  <rect x="20" y="206" width="216" height="20" rx="5" fill="#2A2C2E" />
+  <circle cx="45" cy="216" r="4" fill="#3C4043"/>
+  <circle cx="65" cy="216" r="4" fill="#3C4043"/>
+  <circle cx="85" cy="216" r="4" fill="#3C4043"/>
+  <circle cx="105" cy="216" r="4" fill="#3C4043"/>
+  <circle cx="125" cy="216" r="4" fill="#3C4043"/>
+  <circle cx="145" cy="216" r="4" fill="#3C4043"/>
+  <circle cx="165" cy="216" r="4" fill="#3C4043"/>
+  <circle cx="185" cy="216" r="4" fill="#3C4043"/>
+  <circle cx="205" cy="216" r="4" fill="#3C4043"/>
+
+  <!-- Lens -->
+  <circle cx="100" cy="128" r="55" fill="#202124" />
+  <circle cx="100" cy="128" r="50" fill="url(#lens-gradient)" />
+  <circle cx="100" cy="128" r="30" fill="#202124" />
+
+  <!-- REC Indicator -->
+  <circle cx="200" cy="80" r="12" fill="#EA4335" />
+  <text x="200" y="85" font-family="sans-serif" font-size="12" fill="white" text-anchor="middle" font-weight="bold">REC</text>
+
+  <!-- Kapture Text -->
+  <text x="195" y="160" font-family="sans-serif" font-size="28" fill="white" text-anchor="middle" font-weight="500">Kapture</text>
+</svg>
