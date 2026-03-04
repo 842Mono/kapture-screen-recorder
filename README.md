@@ -2,6 +2,8 @@
 
 A simple, native Wayland screen recorder built with C, GTK4, and GStreamer.
 
+![Kapture Icon](./kapture-icon.svg)
+
 ## Prerequisites
 
 Before running or building the application, ensure you have the necessary dependencies installed.
@@ -49,12 +51,6 @@ You can run the compiled application directly from the terminal:
 *   **Multiple Formats:** Supports MKV, MP4, WebM, AVI, and MOV.
 *   **High Performance:** Includes options for raw/lossless recording and optimized buffering.
 *   **Pipeline Editor:** View and edit the underlying GStreamer pipeline for advanced control.
-
-## Icon
-
-The project includes `kapture-icon.svg`, a scalable vector graphic that can be used as an application icon or for branding.
-
-!Kapture Icon
 
 ## Packaging
 
