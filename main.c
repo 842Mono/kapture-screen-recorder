@@ -24,6 +24,9 @@ typedef struct {
     gchar *session_handle;
     GCancellable *cancellable;
     guint request_signal_id; /* ID for the DBus signal subscription */
+    GstDeviceMonitor *device_monitor;
+    guint refresh_timeout_id;
+    guint monitor_bus_watch_id;
 
     gchar *default_mic_id;
     gchar *default_monitor_id;
@@ -36,7 +39,12 @@ static void on_start_called (GObject *source_object, GAsyncResult *res, gpointer
 static void on_sources_selected (GObject *source_object, GAsyncResult *res, gpointer user_data);
 static void on_session_created (GObject *source_object, GAsyncResult *res, gpointer user_data);
 static void on_proxy_created (GObject *source_object, GAsyncResult *res, gpointer user_data);
+static void on_audio_source_changed(GObject *dropdown, GParamSpec *pspec, gpointer user_data);
+static void refresh_audio_devices_ui(AppData *data);
+static gboolean monitor_bus_func(GstBus *bus, GstMessage *msg, gpointer user_data);
+static gboolean do_audio_refresh(gpointer user_data);
 
+static void on_refresh_audio_clicked(GtkButton *button, gpointer user_data);
 /* Checks for required GStreamer plugins and shows an error dialog if they are missing */
 static gboolean
 check_gst_plugins (GtkWindow *parent)
@@ -94,28 +102,6 @@ check_gst_plugins (GtkWindow *parent)
     }
 
     return TRUE;
-}
-
-/* Callback for when the window is destroyed */
-static void
-on_window_destroy (GtkWidget *widget, gpointer user_data)
-{
-    AppData *data = (AppData *) user_data;
-    data->window = NULL;
-    data->start_button = NULL;
-    data->stop_button = NULL;
-    data->filename_entry = NULL;
-    data->audio_source_combo = NULL;
-    data->mix_source1_combo = NULL;
-    data->mix_source2_combo = NULL;
-    data->mix_box = NULL;
-    data->manual_box = NULL;
-    data->pipeline_view = NULL;
-    data->cursor_check = NULL;
-    data->quality_combo = NULL;
-    data->framerate_combo = NULL;
-    data->pipeline_check = NULL;
-    g_hash_table_destroy(data->display_labels);
 }
 
 /* Resets the UI and cleans up all recording-related state */
@@ -337,7 +323,6 @@ build_pipeline_string(AppData *data, const gchar *video_node_str, guint32 portal
 static void
 start_gstreamer_pipeline (AppData *data, guint32 video_node_id, guint32 audio_node_id)
 {
-    gchar *pipeline_str = NULL;
     GstBus *bus = NULL;
     GstStateChangeReturn ret;
 
@@ -815,21 +800,76 @@ find_string_in_model(GtkStringList *model, const gchar *str, guint *pos)
     return FALSE;
 }
 
+/* The core logic to refresh the audio device lists in the UI */
+static void
+refresh_audio_devices_ui(AppData *data)
+{
+    g_print("Refreshing audio devices UI...\n");
+
+    /* Get models */
+    GtkStringList *audio_model = GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->audio_source_combo)));
+    GtkStringList *mix1_model = GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->mix_source1_combo)));
+    GtkStringList *mix2_model = GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->mix_source2_combo)));
+
+    /* Store current selections to try and restore them */
+    const gchar *selected_audio = gtk_string_list_get_string(audio_model, gtk_drop_down_get_selected(GTK_DROP_DOWN(data->audio_source_combo)));
+    gchar *stored_audio = g_strdup(selected_audio);
+    const gchar *selected_mix1 = gtk_string_list_get_string(mix1_model, gtk_drop_down_get_selected(GTK_DROP_DOWN(data->mix_source1_combo)));
+    gchar *stored_mix1 = g_strdup(selected_mix1);
+    const gchar *selected_mix2 = gtk_string_list_get_string(mix2_model, gtk_drop_down_get_selected(GTK_DROP_DOWN(data->mix_source2_combo)));
+    gchar *stored_mix2 = g_strdup(selected_mix2);
+
+    /* Clear models */
+    guint n_items = g_list_model_get_n_items(G_LIST_MODEL(audio_model));
+    if (n_items > 0) gtk_string_list_splice(audio_model, 0, n_items, NULL);
+
+    n_items = g_list_model_get_n_items(G_LIST_MODEL(mix1_model));
+    if (n_items > 0) gtk_string_list_splice(mix1_model, 0, n_items, NULL);
+
+    n_items = g_list_model_get_n_items(G_LIST_MODEL(mix2_model));
+    if (n_items > 0) gtk_string_list_splice(mix2_model, 0, n_items, NULL);
+
+    /* Clear state that will be repopulated */
+    g_hash_table_remove_all(data->display_labels);
+    g_clear_pointer(&data->default_mic_id, g_free);
+    g_clear_pointer(&data->default_monitor_id, g_free);
+
+    /* Repopulate data from the device monitor */
+    populate_audio_sources(data);
+
+    /* Try to restore previous selections */
+    guint pos;
+    if (find_string_in_model(audio_model, stored_audio, &pos)) {
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(data->audio_source_combo), pos);
+    }
+    if (find_string_in_model(mix1_model, stored_mix1, &pos)) {
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(data->mix_source1_combo), pos);
+    }
+    if (find_string_in_model(mix2_model, stored_mix2, &pos)) {
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(data->mix_source2_combo), pos);
+    }
+
+    g_free(stored_audio);
+    g_free(stored_mix1);
+    g_free(stored_mix2);
+
+    /* Re-trigger UI updates based on new state */
+    on_audio_source_changed(G_OBJECT(data->audio_source_combo), NULL, data);
+}
+
+/* "Refresh Audio" button click handler */
+static void
+on_refresh_audio_clicked(GtkButton *button, gpointer user_data)
+{
+    refresh_audio_devices_ui((AppData *)user_data);
+}
+
 /* Populates the audio source combo box with devices found by GStreamer */
 static void
 populate_audio_sources(AppData *data) {
-    GstDeviceMonitor *monitor = gst_device_monitor_new();
-    
-    /* Ask for everything to ensure we don't miss monitors due to filtering */
-    gst_device_monitor_set_show_all_devices(monitor, TRUE);
-    gst_device_monitor_add_filter(monitor, NULL, NULL);
-    gst_device_monitor_start(monitor);
-
-    /* PulseAudio and PipeWire device providers are asynchronous.
-     * We need to pump the main loop briefly to let them discover devices. */
-    for (int i = 0; i < 100; i++) {
-        while (g_main_context_iteration(NULL, FALSE));
-        g_usleep(10000); /* Wait 1 second total */
+    if (!data->device_monitor) {
+        g_printerr("Device monitor not initialized!\n");
+        return;
     }
 
     /* Add special items first */
@@ -843,7 +883,7 @@ populate_audio_sources(AppData *data) {
     GtkStringList *mix1_model = GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->mix_source1_combo)));
     GtkStringList *mix2_model = GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->mix_source2_combo)));
 
-    GList *devices = gst_device_monitor_get_devices(monitor);
+    GList *devices = gst_device_monitor_get_devices(data->device_monitor);
     for (GList *l = devices; l != NULL; l = l->next) {
         GstDevice *device = l->data;
         gchar *name = gst_device_get_display_name(device);
@@ -933,8 +973,6 @@ populate_audio_sources(AppData *data) {
     gtk_drop_down_set_selected(GTK_DROP_DOWN(data->audio_source_combo), 0); /* "Portal Provided Audio" */
 
     g_list_free_full(devices, g_object_unref);
-    gst_device_monitor_stop(monitor);
-    g_object_unref(monitor);
 }
 
 static void update_pipeline_display(AppData *data) {
@@ -971,6 +1009,63 @@ on_pipeline_check_toggled (GtkCheckButton *button, gpointer user_data)
     }
 }
 
+/* Debounced callback to refresh the UI when the device list changes */
+static gboolean
+do_audio_refresh(gpointer user_data)
+{
+    AppData *data = (AppData *)user_data;
+    refresh_audio_devices_ui(data);
+    data->refresh_timeout_id = 0;
+    return G_SOURCE_REMOVE; /* Run only once */
+}
+
+/* Final cleanup function connected to the application's shutdown signal */
+static void
+on_app_shutdown(GtkApplication *app, gpointer user_data)
+{
+    AppData *data = (AppData *)user_data;
+    g_print("Application shutting down. Final cleanup.\n");
+
+    if (data->monitor_bus_watch_id > 0) {
+        g_source_remove(data->monitor_bus_watch_id);
+        data->monitor_bus_watch_id = 0;
+    }
+
+    /* Stop the device monitor */
+    if (data->device_monitor) {
+        gst_device_monitor_stop(data->device_monitor);
+        g_clear_object(&data->device_monitor);
+    }
+
+    /* Free all remaining allocated memory */
+    g_hash_table_destroy(data->display_labels);
+    g_free(data->default_mic_id);
+    g_free(data->default_monitor_id);
+    g_free(data->session_handle);
+    g_free(data);
+}
+
+/* Bus watch function to detect device changes */
+static gboolean
+monitor_bus_func(GstBus *bus, GstMessage *msg, gpointer user_data)
+{
+    AppData *data = (AppData *)user_data;
+    
+    switch (GST_MESSAGE_TYPE(msg)) {
+        case GST_MESSAGE_DEVICE_ADDED:
+        case GST_MESSAGE_DEVICE_REMOVED:
+            g_print("Device change detected on bus, scheduling refresh...\n");
+            if (data->refresh_timeout_id > 0) {
+                g_source_remove(data->refresh_timeout_id);
+            }
+            data->refresh_timeout_id = g_timeout_add(500, do_audio_refresh, data);
+            break;
+        default:
+            break;
+    }
+    return TRUE;
+}
+
 /* This function is called when the application is first activated */
 static void
 activate (GtkApplication *app, gpointer user_data)
@@ -979,7 +1074,7 @@ activate (GtkApplication *app, gpointer user_data)
     GtkWidget *box;
 
     data->window = gtk_application_window_new (app);
-    g_signal_connect (data->window, "destroy", G_CALLBACK (on_window_destroy), data);
+    /* The main application shutdown signal is now used for cleanup */
     gtk_window_set_title (GTK_WINDOW (data->window), "Kapture Screen Recorder");
 
     gtk_window_set_default_size (GTK_WINDOW (data->window), 350, -1); /* -1 for auto height */
@@ -1004,9 +1099,22 @@ activate (GtkApplication *app, gpointer user_data)
     gtk_editable_set_text(GTK_EDITABLE(data->filename_entry), "Kapture Recording");
     gtk_box_append(GTK_BOX(box), data->filename_entry);
 
+    /* --- Audio Header Box (Label + Refresh Button) --- */
+    GtkWidget *audio_header_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(box), audio_header_box);
+
     GtkWidget *audio_label = gtk_label_new ("Audio Source:");
     gtk_widget_set_halign (audio_label, GTK_ALIGN_START);
-    gtk_box_append (GTK_BOX (box), audio_label);
+    gtk_box_append (GTK_BOX (audio_header_box), audio_label);
+
+    GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_hexpand(spacer, TRUE);
+    gtk_box_append(GTK_BOX(audio_header_box), spacer);
+
+    GtkWidget *refresh_button = gtk_button_new_from_icon_name("view-refresh-symbolic");
+    gtk_widget_set_tooltip_text(refresh_button, "Refresh Audio Devices");
+    g_signal_connect(refresh_button, "clicked", G_CALLBACK(on_refresh_audio_clicked), data);
+    gtk_box_append(GTK_BOX(audio_header_box), refresh_button);
 
     /* Create a factory for our dropdowns to use custom labels */
     GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
@@ -1122,6 +1230,17 @@ activate (GtkApplication *app, gpointer user_data)
     gtk_drop_down_set_selected(GTK_DROP_DOWN(data->quality_combo), 0);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(data->framerate_combo), 3); /* Default to 60 FPS */
 
+    /* Create and start a persistent device monitor for automatic refreshes */
+    data->device_monitor = gst_device_monitor_new();
+    
+    GstBus *bus = gst_device_monitor_get_bus(data->device_monitor);
+    data->monitor_bus_watch_id = gst_bus_add_watch(bus, monitor_bus_func, data);
+    gst_object_unref(bus);
+
+    gst_device_monitor_set_show_all_devices(data->device_monitor, TRUE);
+    gst_device_monitor_add_filter(data->device_monitor, NULL, NULL);
+    gst_device_monitor_start(data->device_monitor);
+
     /* Populate audio sources now that all widgets are created */
     populate_audio_sources(data);
 
@@ -1150,16 +1269,12 @@ main (int argc, char **argv)
         return -1;
     }
 
-    app = gtk_application_new ("org.kde.kapturescreenrecorder", G_APPLICATION_DEFAULT_FLAGS);
+    app = gtk_application_new ("com.github.yourname.kapture", G_APPLICATION_DEFAULT_FLAGS);
+    g_signal_connect (app, "shutdown", G_CALLBACK (on_app_shutdown), data);
     g_signal_connect (app, "activate", G_CALLBACK (activate), data);
     status = g_application_run (G_APPLICATION (app), argc, argv);
 
-    /* Clean up */
     g_object_unref (app);
-    reset_ui_and_state(data); /* Final cleanup of any remaining state */
-    g_free (data->default_mic_id);
-    g_free (data->default_monitor_id);
-    g_free (data);
 
     return status;
 }

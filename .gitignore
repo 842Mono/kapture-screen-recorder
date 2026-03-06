@@ -1,2 +1,11 @@
 # Ignore Debian packaging build directory
 kapture-deb/
+
+# Ignore debuild output files
+*.build
+*.buildinfo
+*.changes
+*.dsc
+*.tar.gz
+debian/kapture-screen-recorder/
+debian/files

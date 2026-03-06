@@ -22,8 +22,8 @@ gstreamer1.0-pipewire gstreamer1.0-tools
 These packages are required if you want to compile or modify the source code:
 
 ```bash
-sudo apt install build-essential libgtk-4-dev libgstreamer1.0-dev \
-libgstreamer-plugins-base1.0-dev
+sudo apt install build-essential debhelper libgtk-4-dev libgstreamer1.0-dev \
+libgstreamer-plugins-base1.0-dev devscripts ubuntu-dev-tools
 ```
 
 ## How to Build
