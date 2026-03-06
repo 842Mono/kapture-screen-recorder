@@ -34,7 +34,7 @@ cat > kapture-deb/usr/share/applications/kapture-screen-recorder.desktop <<EOF
 Name=Kapture Screen Recorder
 Comment=Record your Wayland screen
 Exec=/usr/bin/kapture-screen-recorder
-Icon=kapture-icon
+Icon=io.github.842mono.kapture
 Terminal=false
 Type=Application
 Categories=AudioVideo;Recorder;
@@ -46,7 +46,7 @@ cp kapture-screen-recorder kapture-deb/usr/bin/
 chmod 755 kapture-deb/usr/bin/kapture-screen-recorder
 
 # Copy the icon to the standard system icon path so the desktop entry finds it
-cp kapture-icon.svg kapture-deb/usr/share/icons/hicolor/scalable/apps/kapture-icon.svg
+cp kapture-icon.svg kapture-deb/usr/share/icons/hicolor/scalable/apps/io.github.842mono.kapture.svg
 
 # 6. Build
 echo "Building .deb..."

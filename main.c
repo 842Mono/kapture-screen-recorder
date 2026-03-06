@@ -1269,7 +1269,7 @@ main (int argc, char **argv)
         return -1;
     }
 
-    app = gtk_application_new ("com.github.yourname.kapture", G_APPLICATION_DEFAULT_FLAGS);
+    app = gtk_application_new ("io.github.842mono.kapture", G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect (app, "shutdown", G_CALLBACK (on_app_shutdown), data);
     g_signal_connect (app, "activate", G_CALLBACK (activate), data);
     status = g_application_run (G_APPLICATION (app), argc, argv);
