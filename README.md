@@ -4,6 +4,16 @@ A simple, native Wayland screen recorder built with C, GTK4, and GStreamer.
 
 ![Kapture Icon](./kapture-icon.svg)
 
+## PPA Install
+
+Kapture is available to install via PPA.
+
+```bash
+sudo add-apt-repository ppa:842mono/kdeneonpackages
+sudo apt update
+sudo apt install kapture-screen-recorder
+```
+
 ## Prerequisites
 
 Before running or building the application, ensure you have the necessary dependencies installed.
